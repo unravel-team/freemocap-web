@@ -3,6 +3,7 @@ name = "freemocap-web"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
+license = "AGPL-3.0-only"
 authors = [
     { name = "Kapil Reddy", email = "reddy.kapil@gmail.com" }
 ]
