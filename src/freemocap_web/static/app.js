@@ -1,4 +1,5 @@
 import { mountPose3dViewer } from "./pose3d.js";
+import { mountCalibration3dViewer } from "./calibration3d.js";
 
 const form = document.querySelector("#syncForm");
 const appShell = document.querySelector("#appShell");
@@ -868,53 +869,15 @@ function formatCalibrationValue(value, suffix = "") {
 
 function renderCalibrationArtifact(shot) {
   const artifact = shot.calibration_artifact;
+  calibrationResultArtifact.querySelector(".calibration3d-root")?.__calibration3dCleanup?.();
   if (!artifact) {
     calibrationResultArtifact.innerHTML = `<div class="video-row muted">Run calibration to create a camera layout artifact.</div>`;
     return;
   }
 
-  const positions = artifact.cameras
-    .map((camera) => camera.world_position || [0, 0, 0])
-    .filter((position) => position.length >= 3);
-  const xs = positions.map((position) => Number(position[0]) || 0);
-  const zs = positions.map((position) => Number(position[2]) || 0);
-  const minX = Math.min(...xs, -1000);
-  const maxX = Math.max(...xs, 1000);
-  const minZ = Math.min(...zs, -1000);
-  const maxZ = Math.max(...zs, 1000);
-  const spanX = Math.max(1, maxX - minX);
-  const spanZ = Math.max(1, maxZ - minZ);
-
-  const cameraMarkers = artifact.cameras
-    .map((camera, index) => {
-      const position = camera.world_position || [0, 0, 0];
-      const xPercent = 10 + (((Number(position[0]) || 0) - minX) / spanX) * 80;
-      const zPercent = 10 + (((Number(position[2]) || 0) - minZ) / spanZ) * 80;
-      const left = 18 + xPercent * 0.64;
-      const top = 80 - zPercent * 0.34;
-      return `
-        <span class="camera-marker" style="left:${left.toFixed(2)}%; top:${top.toFixed(2)}%; --depth:${zPercent.toFixed(2)}%">
-          <strong>${index + 1}</strong>
-          <small>${camera.name}</small>
-        </span>
-      `;
-    })
-    .join("");
-
   calibrationResultArtifact.innerHTML = `
     <article class="calibration-artifact">
-      <div class="calibration-map">
-        <div class="ground-plane-scene">
-          <span class="map-grid"></span>
-          <span class="ground-origin-point"></span>
-          <span class="ground-axis ground-axis-x">X</span>
-          <span class="ground-axis ground-axis-y">Y</span>
-          <span class="ground-axis ground-axis-z">Z</span>
-        </div>
-        <span class="origin-marker">origin</span>
-        <span class="ground-plane-badge">${artifact.groundplane_calibration ? "ChArUco ground plane" : "Camera 0 origin"}</span>
-        ${cameraMarkers}
-      </div>
+      <div class="calibration3d-root"></div>
       <dl class="calibration-facts">
         <div>
           <dt>Status</dt>
@@ -935,6 +898,7 @@ function renderCalibrationArtifact(shot) {
       </dl>
     </article>
   `;
+  mountCalibration3dViewer(calibrationResultArtifact.querySelector(".calibration3d-root"), artifact);
 }
 
 function renderCalibrationPreview(shot) {

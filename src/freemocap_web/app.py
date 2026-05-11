@@ -531,6 +531,20 @@ def _get_calibration_toml_path(recording_folder: Path) -> Path | None:
     return toml_paths[0] if toml_paths else None
 
 
+def _camera_center_from_extrinsics(camera_data: dict) -> list[float] | None:
+    try:
+        import cv2
+        import numpy as np
+
+        rotation = np.asarray(camera_data.get("rotation", [0, 0, 0]), dtype="float64").reshape(3, 1)
+        translation = np.asarray(camera_data.get("translation", [0, 0, 0]), dtype="float64").reshape(3, 1)
+        rotation_matrix, _ = cv2.Rodrigues(rotation)
+        camera_center = -rotation_matrix.T @ translation
+        return [float(value) for value in camera_center.reshape(3)]
+    except Exception:
+        return None
+
+
 def _calibration_artifact_from_toml(calibration_toml_path: Path | None) -> dict | None:
     if calibration_toml_path is None or not calibration_toml_path.exists():
         return None
@@ -542,15 +556,21 @@ def _calibration_artifact_from_toml(calibration_toml_path: Path | None) -> dict 
 
     metadata = calibration_data.get("metadata") if isinstance(calibration_data.get("metadata"), dict) else {}
     cameras: list[dict] = []
+    position_source = "world_position"
     for key, value in calibration_data.items():
         if not isinstance(value, dict) or "matrix" not in value:
             continue
-        world_position = value.get("world_position") or value.get("translation") or [0, 0, 0]
+        camera_center = _camera_center_from_extrinsics(value)
+        world_position = value.get("world_position")
+        if world_position is None:
+            world_position = camera_center or [0, 0, 0]
+            position_source = "extrinsic_camera_center"
         cameras.append(
             {
                 "id": key,
                 "name": value.get("name") or key,
                 "world_position": world_position,
+                "camera_center": camera_center,
                 "image_size": value.get("size"),
             }
         )
@@ -560,6 +580,7 @@ def _calibration_artifact_from_toml(calibration_toml_path: Path | None) -> dict 
         "toml_path": str(calibration_toml_path),
         "camera_count": len(cameras),
         "cameras": cameras,
+        "position_source": position_source,
         "date_time_calibrated": metadata.get("date_time_calibrated"),
         "charuco_square_size": metadata.get("charuco_square_size"),
         "charuco_board": metadata.get("charuco_board_object"),
