@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FreeMoCap Web</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260511-linked-players-fallback" />
+  </head>
+  <body>
+    <section class="onboarding-screen" id="projectOnboarding">
+      <form class="onboarding-card" id="createProjectForm">
+        <span class="metadata-label">FreeMoCap Web</span>
+        <h1>Create a project</h1>
+        <p>A project groups shots. Each shot is one take, and each shot can become calibration or motion capture data after sync.</p>
+        <label class="field">
+          <span>Project name</span>
+          <input id="projectNameInput" name="name" autocomplete="off" placeholder="Dance capture May 09" required />
+        </label>
+        <button class="primary" type="submit">Create project</button>
+      </form>
+    </section>
+
+    <div class="shell app-hidden" id="appShell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="mark">FM</span>
+          <div>
+            <strong>FreeMoCap Web</strong>
+          </div>
+        </div>
+        <div class="project-card">
+          <span class="metadata-label">Project</span>
+          <strong id="projectNameCard">Untitled project</strong>
+        </div>
+        <nav aria-label="Main">
+          <a id="createShotNav" href="#new-shot">Create shot</a>
+        </nav>
+        <section class="sidebar-shots" aria-label="Project shots">
+          <div class="sidebar-section-title">Shots</div>
+          <div id="sidebarShotsList" class="sidebar-shot-list"></div>
+        </section>
+        <div class="system" id="systemStatus">Loading system status...</div>
+      </aside>
+
+      <main>
+        <section class="workspace" id="new-shot">
+          <form id="syncForm" class="sync-workbench">
+            <div class="shot-header">
+              <div>
+                <span class="metadata-label">New shot</span>
+                <h2>Create a shot</h2>
+              </div>
+              <button class="secondary" id="refreshButton" type="button">Refresh</button>
+            </div>
+
+            <label class="field">
+              <span>Shot name</span>
+              <input id="recordingName" name="recording_name" autocomplete="off" required />
+            </label>
+
+            <label class="dropzone" for="fileInput" id="dropzone">
+              <input id="fileInput" name="files" type="file" accept=".mp4,video/mp4" multiple />
+              <span class="drop-title" id="selectedVideoSummary">Select videos</span>
+              <span class="drop-copy">Choose one or more MP4 files from the same take.</span>
+            </label>
+
+            <div class="choice-group" aria-label="Shot purpose">
+              <span>Purpose</span>
+              <label><input type="radio" name="purpose" value="motion_capture" checked /> Motion capture</label>
+              <label><input type="radio" name="purpose" value="calibration" /> Calibration</label>
+              <label><input type="radio" name="purpose" value="unassigned" /> Decide later</label>
+            </div>
+
+            <details class="advanced-options">
+              <summary>Sync options</summary>
+              <div class="controls-row">
+                <label class="field">
+                  <span>Method</span>
+                  <select id="syncMethod" name="synchronization_method">
+                    <option value="audio">Audio cross correlation</option>
+                    <option value="brightness">Brightness contrast detection</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Brightness threshold</span>
+                  <input id="brightnessThreshold" name="brightness_threshold" type="number" min="1" value="1000" />
+                </label>
+              </div>
+            </details>
+
+            <div class="job-console is-hidden" id="jobConsole">
+              <div class="progress-panel" id="progressPanel" aria-live="polite">
+                <div class="progress-header">
+                  <strong id="progressTitle">Waiting for videos</strong>
+                  <span id="progressPercent">0%</span>
+                </div>
+                <div class="progress-track">
+                  <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <div class="progress-message" id="progressMessage">Select one or more MP4 files to create a shot.</div>
+              </div>
+              <div class="job-log" aria-label="Job log">
+                <strong>Job log</strong>
+                <code id="logLineOne">Waiting for source videos</code>
+                <code id="logLineTwo">Sync job not started</code>
+              </div>
+            </div>
+
+            <div class="actions">
+              <button class="primary" id="syncButton" type="submit" disabled>Create shot and sync</button>
+              <output id="syncStatus"></output>
+            </div>
+          </form>
+
+          <section class="shot-detail is-hidden" id="shotDetailPanel">
+            <div class="shot-header">
+              <div>
+                <span class="metadata-label">Shot</span>
+                <h2 id="selectedShotName">Select a shot</h2>
+              </div>
+              <button class="secondary" id="detailRefreshButton" type="button">Refresh</button>
+            </div>
+
+            <dl class="shot-summary">
+              <div>
+                <dt>Purpose</dt>
+                <dd id="selectedShotPurpose">-</dd>
+              </div>
+              <div>
+                <dt>State</dt>
+                <dd id="selectedShotState">-</dd>
+              </div>
+              <div>
+                <dt>Videos</dt>
+                <dd id="selectedShotVideoCount">-</dd>
+              </div>
+            </dl>
+
+            <section class="detail-section">
+              <h3>Videos</h3>
+              <div id="selectedShotVideos" class="video-list"></div>
+            </section>
+
+            <section class="detail-section" id="selectedJobSection">
+              <h3>Latest job</h3>
+              <div class="progress-panel" aria-live="polite">
+                <div class="progress-header">
+                  <strong id="detailProgressTitle">No job selected</strong>
+                  <span id="detailProgressPercent">0%</span>
+                </div>
+                <div class="progress-track">
+                  <div class="progress-fill" id="detailProgressFill"></div>
+                </div>
+                <div class="progress-message" id="detailProgressMessage">Select or create a shot to see job state.</div>
+              </div>
+              <div class="job-log" aria-label="Selected shot job log">
+                <strong>Job log</strong>
+                <code id="detailLogLineOne">No job selected</code>
+                <code id="detailLogLineTwo">Waiting for activity</code>
+              </div>
+            </section>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js?v=20260511-linked-players-fallback" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FreeMoCap Web Design System</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/design-system.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="mark">FM</span>
+          <div>
+            <strong>FreeMoCap Web</strong>
+            <span>Design system</span>
+          </div>
+        </div>
+        <nav aria-label="Design system sections">
+          <a class="active" href="#principles">Principles</a>
+          <a href="#tokens">Tokens</a>
+          <a href="#components">Components</a>
+          <a href="#jobs">Jobs</a>
+          <a href="/">App</a>
+        </nav>
+        <div class="system">Product UI for imported videos, sync, calibration, and motion capture jobs.</div>
+      </aside>
+
+      <main>
+        <section class="topbar ds-topbar">
+          <div>
+            <p class="eyebrow">Design system</p>
+            <h1>FreeMoCap Web interface rules</h1>
+          </div>
+          <a class="button-link secondary" href="/">Open app</a>
+        </section>
+
+        <div class="ds-page">
+          <section class="ds-hero" aria-label="Design system overview">
+            <div class="hero-copy">
+              <p class="eyebrow">Operating Surface</p>
+              <h2>Imported footage becomes a durable shot workspace.</h2>
+              <p>
+                The interface should feel like a calm instrument panel: visible files, persistent jobs,
+                and enough visual weight to make active processing unmistakable.
+              </p>
+            </div>
+            <div class="hero-instrument">
+              <div class="instrument-header">
+                <strong>walk_test_03</strong>
+                <span>Sync running</span>
+              </div>
+              <div class="sensor-grid">
+                <span></span><span></span><span></span><span></span>
+              </div>
+              <div class="signal-stack" aria-hidden="true">
+                <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+              </div>
+              <div class="instrument-footer">
+                <span>4 cameras</span>
+                <span>42%</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="ds-section" id="principles">
+            <div class="ds-section-copy">
+              <p class="eyebrow">Principles</p>
+              <h2>Shot-first, job-aware, file-system honest.</h2>
+              <p>
+                The UI treats a shot as the workspace. Source videos, synced videos, calibration outputs,
+                and motion capture outputs stay visible as durable state.
+              </p>
+            </div>
+            <div class="principle-list">
+              <div class="principle">
+                <span class="principle-index">01</span>
+                <strong>No capture affordances</strong>
+                <span>Browser camera recording is out of scope and must not appear in navigation or controls.</span>
+              </div>
+              <div class="principle">
+                <span class="principle-index">02</span>
+                <strong>Every long task is a job</strong>
+                <span>Sync, calibration, and motion capture survive refresh through persisted job records.</span>
+              </div>
+              <div class="principle">
+                <span class="principle-index">03</span>
+                <strong>FreeMoCap owns processing</strong>
+                <span>The web UI wraps upstream FreeMoCap and Skelly behavior instead of recreating it.</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="ds-section" id="tokens">
+            <div class="ds-section-copy">
+              <p class="eyebrow">Tokens</p>
+              <h2>Restrained lab workspace</h2>
+              <p>Light surfaces, quiet borders, a single teal action accent, and semantic colors reserved for state.</p>
+            </div>
+            <div class="token-grid">
+              <div class="swatch bg"><span>Background</span><code>--bg</code></div>
+              <div class="swatch panel"><span>Panel</span><code>--panel</code></div>
+              <div class="swatch panel2"><span>Raised Neutral</span><code>--panel-2</code></div>
+              <div class="swatch text"><span>Text</span><code>--text</code></div>
+              <div class="swatch accent"><span>Action</span><code>--accent</code></div>
+              <div class="swatch success"><span>Success</span><code>--success</code></div>
+              <div class="swatch danger"><span>Error</span><code>--danger</code></div>
+            </div>
+            <div class="type-scale">
+              <div><span>Page title</span><strong class="type-xl">28px / 1.18</strong></div>
+              <div><span>Section title</span><strong class="type-lg">18px / 1.25</strong></div>
+              <div><span>Body</span><strong class="type-md">14px / 1.45</strong></div>
+              <div><span>Metadata</span><strong class="type-sm">12px / 1.45</strong></div>
+            </div>
+          </section>
+
+          <section class="ds-section" id="components">
+            <div class="ds-section-copy">
+              <p class="eyebrow">Components</p>
+              <h2>Controls and surfaces</h2>
+              <p>Components should be familiar, compact, and explicit about state.</p>
+            </div>
+
+            <div class="component-grid">
+              <div class="component-demo">
+                <h3>Buttons</h3>
+                <div class="demo-row">
+                  <button class="primary" type="button">Run Skelly sync</button>
+                  <button class="secondary" type="button">Refresh</button>
+                  <button class="secondary" type="button" disabled>Waiting</button>
+                </div>
+              </div>
+
+              <div class="component-demo">
+                <h3>Fields</h3>
+                <label class="field">
+                  <span>Recording name</span>
+                  <input value="walk_test_03" />
+                </label>
+                <label class="field">
+                  <span>Sync method</span>
+                  <select>
+                    <option>Audio cross correlation</option>
+                    <option>Brightness contrast detection</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="component-demo">
+                <h3>Video Card</h3>
+                <article class="video-slot">
+                  <div class="video-placeholder">
+                    <div class="frame-bars"><i></i><i></i><i></i><i></i><i></i></div>
+                    <span>camera_01 preview</span>
+                  </div>
+                  <div class="video-meta">
+                    <strong>camera_01.mp4</strong>
+                    <span>184.2 MB</span>
+                  </div>
+                </article>
+              </div>
+
+              <div class="component-demo">
+                <h3>Status Badges</h3>
+                <div class="demo-row">
+                  <span class="badge">Ready</span>
+                  <span class="badge pending">Running</span>
+                  <span class="badge failed">Failed</span>
+                </div>
+              </div>
+
+              <div class="component-demo wide-demo">
+                <h3>Shot Header</h3>
+                <div class="shot-header-demo">
+                  <div>
+                    <span class="metadata-label">Active shot</span>
+                    <strong>calibration_grid_01</strong>
+                    <code>~/freemocap_data/recording_sessions/calibration_grid_01</code>
+                  </div>
+                  <div class="shot-stats">
+                    <span><strong>6</strong> videos</span>
+                    <span><strong>30.0</strong> fps</span>
+                    <span><strong>2160p</strong> source</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="ds-section" id="jobs">
+            <div class="ds-section-copy">
+              <p class="eyebrow">Jobs</p>
+              <h2>Durable pipeline state</h2>
+              <p>Refresh should restore the active shot and its running job from server-side state.</p>
+            </div>
+
+            <div class="job-layout">
+              <div class="shot-row selected">
+                <div>
+                  <strong>walk_test_03</strong>
+                  <span>4 source videos</span>
+                </div>
+                <span class="badge pending">Syncing</span>
+              </div>
+              <div class="shot-row">
+                <div>
+                  <strong>calibration_grid_01</strong>
+                  <span>6 source videos</span>
+                </div>
+                <span class="badge">Synced</span>
+              </div>
+              <div class="progress-panel">
+                <div class="progress-header">
+                  <strong>Sync videos</strong>
+                  <span>42%</span>
+                </div>
+                <div class="progress-track">
+                  <div class="progress-fill sample-progress"></div>
+                </div>
+                <div class="progress-message">Running audio synchronization on 4 videos.</div>
+              </div>
+              <ol class="pipeline-list">
+                <li class="running"><span>1</span><strong>Sync videos</strong><em>Running</em></li>
+                <li><span>2</span><strong>Calibration</strong><em>Waiting for synced videos</em></li>
+                <li><span>3</span><strong>Motion capture</strong><em>Waiting for synced videos</em></li>
+              </ol>
+              <div class="job-log">
+                <strong>Job log</strong>
+                <code>01:42:10 uploaded 4 videos</code>
+                <code>01:42:14 audio sync started</code>
+                <code>01:43:02 writing synchronized outputs</code>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>
