@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FreeMoCap Web</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260512-calibration-3d-fit" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260512-inline-pose-clips" />
   </head>
   <body>
     <section class="onboarding-screen" id="projectOnboarding">
@@ -236,6 +236,8 @@
                 <span data-stage="save">Save outputs</span>
               </div>
               <div class="step-progress" id="motionJobProgress" hidden></div>
+              <div class="pose-output-progress" id="motionOutputProgress"></div>
+              <div class="pose-inline-clips" id="motionInlineClips"></div>
               <div class="actions compact-actions">
                 <button class="primary" id="motionButton" type="button" disabled>Run pose estimation</button>
                 <output id="motionStatus"></output>
@@ -258,6 +260,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260512-calibration-3d-fit" type="module"></script>
+    <script src="/static/app.js?v=20260512-inline-pose-clips" type="module"></script>
   </body>
 </html>

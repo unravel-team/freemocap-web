@@ -489,6 +489,9 @@ def _shot_to_recording(shot: dict) -> dict:
     recording["pose_preview_videos"] = (
         sorted(path.name for path in annotated_videos_path.glob("*.mp4")) if annotated_videos_path.exists() else []
     )
+    recording["pose_preview_posters"] = (
+        sorted(path.name for path in annotated_videos_path.glob("*.jpg")) if annotated_videos_path.exists() else []
+    )
     recording["pose_preview_ready"] = pose_side_by_side_path.exists()
     recording["pose_side_by_side_video"] = pose_side_by_side_path.name if pose_side_by_side_path.exists() else None
     recording["pose_preview_updated_at"] = max((path.stat().st_mtime_ns for path in annotated_assets), default=None)
@@ -1594,10 +1597,10 @@ def _monitor_calibration_progress(job_id: str, stop_event: threading.Event, prog
 
 def _monitor_motion_capture_outputs(job_id: str, recording_folder: Path, stop_event: threading.Event) -> None:
     stages = [
-        ("data2d", 42, "Running 2D image tracking."),
-        ("raw3d", 68, "Triangulating 3D skeleton data."),
-        ("data3d", 84, "Post-processing skeleton data."),
-        ("center_of_mass", 92, "Calculating anatomical outputs."),
+        ("data2d", 42, "2D tracking data saved."),
+        ("raw3d", 68, "3D triangulation data saved."),
+        ("data3d", 84, "3D skeleton output saved."),
+        ("center_of_mass", 92, "Anatomical outputs saved."),
     ]
     last_progress = 20
     while not stop_event.wait(4):
@@ -1608,6 +1611,15 @@ def _monitor_motion_capture_outputs(job_id: str, recording_folder: Path, stop_ev
             if artifact.get(key):
                 next_progress = max(next_progress, progress)
                 message = stage_message
+        annotated_folder = recording_folder / ANNOTATED_VIDEOS_FOLDER_NAME
+        annotated_videos = (
+            sorted(path for path in annotated_folder.glob("*.mp4") if path.name != "side_by_side.mp4")
+            if annotated_folder.exists()
+            else []
+        )
+        if annotated_videos:
+            next_progress = max(next_progress, 88)
+            message = f"Annotated pose videos available for {len(annotated_videos)} camera{'s' if len(annotated_videos) != 1 else ''}."
         if next_progress > last_progress:
             _set_job(job_id, progress=next_progress, message=message)
             last_progress = next_progress

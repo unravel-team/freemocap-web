@@ -52,6 +52,8 @@ const calibrationPreviewPlayer = document.querySelector("#calibrationPreviewPlay
 const calibrationResultArtifact = document.querySelector("#calibrationResultArtifact");
 const motionState = document.querySelector("#motionState");
 const motionStage = document.querySelector("#motionStage");
+const motionOutputProgress = document.querySelector("#motionOutputProgress");
+const motionInlineClips = document.querySelector("#motionInlineClips");
 const motionButton = document.querySelector("#motionButton");
 const motionStatus = document.querySelector("#motionStatus");
 const motionResultArtifact = document.querySelector("#motionResultArtifact");
@@ -184,7 +186,7 @@ function workflowTabStates(shot) {
     calibration: hasMultiCamSync ? tabStatus("Pending", "is-ready") : tabStatus("Blocked", "is-blocked"),
     "calibration-result": hasCalibration ? tabStatus("Ready", "is-done") : tabStatus("Pending", "is-muted"),
     pose: hasCalibration || syncedVideoCount(shot) === 1 ? tabStatus("Pending", "is-ready") : tabStatus("Blocked", "is-blocked"),
-    "pose-result": hasPose ? tabStatus("Ready", "is-done") : tabStatus("Pending", "is-muted"),
+    "pose-result": hasPose ? tabStatus("Ready", "is-done") : annotatedPoseVideos(shot).length ? tabStatus("Clips ready", "is-ready") : tabStatus("Pending", "is-muted"),
   };
 
   if (job?.type === "manual_resync" && ["queued", "running"].includes(job.state)) {
@@ -371,7 +373,8 @@ function shotState(recording) {
   const hasVideos = Boolean(recording.status?.synchronized_videos_status_check);
   const hasCalibration = Boolean(recording.status?.calibration_toml_check);
   const hasMotionCapture = Boolean(recording.status?.data3d_status_check);
-  if (job?.state === "failed") return { className: "failed", text: "Failed" };
+  if (job?.state === "failed" && job.type === "sync" && !hasVideos) return { className: "failed", text: "Sync failed" };
+  if (job?.state === "failed" && job.type === "calibration" && !hasCalibration) return { className: "failed", text: "Cal failed" };
   if (job?.state === "invalidated") return { className: "", text: hasVideos ? "Synced" : "Draft" };
   if (["queued", "running"].includes(job?.state)) {
     if (job.type === "calibration") return { className: "pending", text: `Cal ${job.progress}%` };
@@ -405,8 +408,21 @@ function jobStep(job) {
   return null;
 }
 
+function setStatePill(element, text, state = "") {
+  element.textContent = text;
+  element.className = state ? `state-pill ${state}` : "state-pill";
+}
+
 function isActiveJob(job) {
   return ["queued", "running"].includes(job?.state);
+}
+
+function failedJobIsBlockingShot(shot) {
+  const job = shot.latest_job;
+  if (job?.state !== "failed") return false;
+  if (job.type === "sync") return !shot.status?.synchronized_videos_status_check;
+  if (job.type === "calibration") return !shot.status?.calibration_toml_check;
+  return false;
 }
 
 function renderStepProgress(panel, job, step) {
@@ -449,9 +465,11 @@ function renderShotActivity(shot) {
   }
 
   const running = isActiveJob(job);
-  const title = running ? `Running: ${jobTitle(job)} ${job.progress}%` : `Latest activity: ${jobTitle(job)}`;
+  const title = job.state === "failed" && job.type === "motion_capture"
+    ? "Last pose attempt failed"
+    : running ? `Running: ${jobTitle(job)} ${job.progress}%` : `Latest activity: ${jobTitle(job)}`;
   shotActivity.textContent = `${title}. ${job.message}`;
-  shotActivity.className = `shot-activity ${running ? "is-running" : ""} ${job.state === "failed" ? "is-failed" : ""}`;
+  shotActivity.className = `shot-activity ${running ? "is-running" : ""} ${failedJobIsBlockingShot(shot) ? "is-failed" : ""}`;
 }
 
 function syncedVideoCount(shot) {
@@ -619,16 +637,16 @@ function renderCalibrationWorkbench(shot) {
   });
 
   if (runningCalibration) {
-    calibrationState.textContent = `${job.progress}%`;
+    setStatePill(calibrationState, `${job.progress}%`, "is-running");
     calibrationStatus.textContent = job.message;
   } else if (hasCalibration) {
-    calibrationState.textContent = "Calibrated";
+    setStatePill(calibrationState, "Calibrated", "is-done");
     calibrationStatus.textContent = shot.calibration_toml_name || "Camera calibration saved.";
   } else if (syncedVideoCount(shot) < 2) {
-    calibrationState.textContent = "Needs synced videos";
+    setStatePill(calibrationState, "Needs synced videos", "is-muted");
     calibrationStatus.textContent = "Sync at least two videos before calibration.";
   } else {
-    calibrationState.textContent = "Ready";
+    setStatePill(calibrationState, "Ready", "is-ready");
     calibrationStatus.textContent = "Uses FreeMoCap Anipose calibration on this shot's synced videos.";
   }
 
@@ -675,8 +693,16 @@ function posePreviewVideoUrl(shot, filename) {
   return `/api/shots/${encodeURIComponent(shot.id)}/pose-preview-videos/${encodeURIComponent(filename)}?v=${encodeURIComponent(posePreviewCacheKey(shot))}`;
 }
 
+function posePreviewPosterName(filename) {
+  return filename.replace(/\.mp4$/i, ".jpg");
+}
+
+function posePreviewPosterExists(shot, filename) {
+  return (shot.pose_preview_posters || []).includes(posePreviewPosterName(filename));
+}
+
 function posePreviewPosterUrl(shot, filename) {
-  const posterName = filename.replace(/\.mp4$/i, ".jpg");
+  const posterName = posePreviewPosterName(filename);
   return `/api/shots/${encodeURIComponent(shot.id)}/pose-preview-posters/${encodeURIComponent(posterName)}?v=${encodeURIComponent(posePreviewCacheKey(shot))}`;
 }
 
@@ -861,6 +887,50 @@ function renderPosePreviewPlayer(shot) {
   `;
 }
 
+function annotatedPoseVideos(shot) {
+  return (shot.pose_preview_videos || []).filter((video) => video !== "side_by_side.mp4");
+}
+
+function renderAnnotatedPoseClips(shot) {
+  const videos = annotatedPoseVideos(shot);
+  if (!videos.length) return "";
+
+  return `
+    <section class="pose-clip-grid" aria-label="Annotated camera clips">
+      ${videos
+        .map((video, index) => `
+          <article class="clip-card">
+            <video controls playsinline preload="metadata" ${posePreviewPosterExists(shot, video) ? `poster="${posePreviewPosterUrl(shot, video)}"` : ""} src="${posePreviewVideoUrl(shot, video)}"></video>
+            <div>
+              <strong>Camera ${index + 1}</strong>
+              <span>${video}</span>
+            </div>
+          </article>
+        `)
+        .join("")}
+    </section>
+  `;
+}
+
+function renderInlinePoseClips(shot) {
+  if (!motionInlineClips) return;
+  const clips = renderAnnotatedPoseClips(shot);
+  if (!clips) {
+    motionInlineClips.innerHTML = "";
+    return;
+  }
+
+  motionInlineClips.innerHTML = `
+    <section class="inline-preview-section">
+      <div class="inline-preview-heading">
+        <strong>Annotated clips</strong>
+        <span>Available before the combined preview is built.</span>
+      </div>
+      ${clips}
+    </section>
+  `;
+}
+
 function formatCalibrationValue(value, suffix = "") {
   if (value === null || value === undefined || value === "") return "-";
   if (typeof value === "number") return `${Number(value).toFixed(1)}${suffix}`;
@@ -928,7 +998,7 @@ function renderCalibrationPreview(shot) {
 }
 
 function updateMotionStages(job, shot) {
-  const progress = job?.type === "motion_capture" ? Number(job.progress) || 0 : 0;
+  const progress = job?.type === "motion_capture" && isActiveJob(job) ? Number(job.progress) || 0 : 0;
   const hasData2d = Boolean(shot.motion_capture_artifact?.data2d || shot.status?.data2d_status_check);
   const hasData3d = Boolean(shot.motion_capture_artifact?.data3d || shot.status?.data3d_status_check);
   const hasCom = Boolean(shot.motion_capture_artifact?.center_of_mass || shot.status?.center_of_mass_data_status_check);
@@ -972,10 +1042,46 @@ function renderMotionArtifact(shot) {
   `;
 }
 
+function renderMotionOutputProgress(shot) {
+  if (!motionOutputProgress) return;
+  const artifact = shot.motion_capture_artifact || {};
+  const annotatedCount = annotatedPoseVideos(shot).length;
+  const items = [
+    ["2D tracking", Boolean(artifact.data2d), artifact.data2d?.name],
+    ["3D triangulation", Boolean(artifact.raw3d), artifact.raw3d?.name],
+    ["Skeleton output", Boolean(artifact.data3d), artifact.data3d?.name],
+    ["Annotated clips", annotatedCount > 0, annotatedCount ? `${annotatedCount} clip${annotatedCount === 1 ? "" : "s"}` : null],
+  ];
+  const hasAnyOutput = items.some(([, done]) => done);
+  const runningMotion = shot.latest_job?.type === "motion_capture" && ["queued", "running"].includes(shot.latest_job.state);
+  const failedMotion = shot.latest_job?.type === "motion_capture" && shot.latest_job.state === "failed";
+  const hasPose = Boolean(shot.status?.data3d_status_check || shot.motion_capture_artifact?.data3d);
+
+  if (!runningMotion && !hasAnyOutput) {
+    motionOutputProgress.innerHTML = "";
+    return;
+  }
+
+  motionOutputProgress.innerHTML = `
+    <div class="pose-output-list" aria-live="polite">
+      ${items
+        .map(([label, done, detail]) => `
+          <div class="${done ? hasPose ? "is-done" : "is-partial" : ""}">
+            <span>${label}</span>
+            <strong>${done ? hasPose ? "Done" : "Available" : failedMotion ? "Not created" : "Waiting"}</strong>
+            <small>${detail || ""}</small>
+          </div>
+        `)
+        .join("")}
+    </div>
+  `;
+}
+
 function renderPosePreview(shot) {
   const hasPose = Boolean(shot.status?.data3d_status_check || shot.motion_capture_artifact?.data3d);
-  const hasAnnotatedVideos = (shot.pose_preview_videos || []).some((video) => video !== "side_by_side.mp4");
-  posePreviewButton.disabled = !hasAnnotatedVideos;
+  const hasAnnotatedVideos = annotatedPoseVideos(shot).length > 0;
+  const runningMotion = shot.latest_job?.type === "motion_capture" && ["queued", "running"].includes(shot.latest_job.state);
+  posePreviewButton.disabled = !hasAnnotatedVideos || runningMotion;
 
   if (!hasPose && !hasAnnotatedVideos) {
     posePreviewStatus.textContent = "Run pose estimation before building a preview.";
@@ -992,9 +1098,11 @@ function renderPosePreview(shot) {
 
   posePreviewButton.textContent = "Build preview";
   posePreviewStatus.textContent = hasAnnotatedVideos
-    ? "Build a side-by-side player from FreeMoCap annotated videos."
+    ? runningMotion
+      ? "Annotated camera clips are appearing as FreeMoCap writes them."
+      : "Annotated camera clips are available. Build the combined side-by-side player when ready."
     : "Waiting for FreeMoCap annotated videos.";
-  posePreviewPlayer.innerHTML = "";
+  posePreviewPlayer.innerHTML = renderAnnotatedPoseClips(shot);
 }
 
 function renderPose3d(shot) {
@@ -1020,21 +1128,26 @@ function renderMotionWorkbench(shot) {
 
   motionButton.disabled = !ready;
   renderMotionArtifact(shot);
+  renderMotionOutputProgress(shot);
+  renderInlinePoseClips(shot);
 
   if (runningMotion) {
-    motionState.textContent = `${job.progress}%`;
+    setStatePill(motionState, `${job.progress}%`, "is-running");
     motionStatus.textContent = job.message;
+  } else if (job?.type === "motion_capture" && job.state === "failed" && !hasData3d) {
+    setStatePill(motionState, "Failed", "is-failed");
+    motionStatus.textContent = `${job.message} You can run pose estimation again.`;
   } else if (hasData3d) {
-    motionState.textContent = "Pose ready";
+    setStatePill(motionState, "Pose ready", "is-done");
     motionStatus.textContent = "FreeMoCap pose outputs are saved in output_data.";
   } else if (syncedVideoCount(shot) < 1) {
-    motionState.textContent = "Needs sync";
+    setStatePill(motionState, "Needs sync", "is-muted");
     motionStatus.textContent = "Sync videos before pose estimation.";
   } else if (!hasCalibration) {
-    motionState.textContent = "Needs calibration";
+    setStatePill(motionState, "Needs calibration", "is-muted");
     motionStatus.textContent = "Run calibration before multi-camera pose estimation.";
   } else {
-    motionState.textContent = "Ready";
+    setStatePill(motionState, "Ready", "is-ready");
     motionStatus.textContent = "Runs FreeMoCap MediaPipe tracking, triangulation, and post-processing.";
   }
 
@@ -1473,8 +1586,13 @@ async function pollJob(jobId) {
   }
   setCreateProgress(job.progress, jobTitle(job), job.message);
   setCreateLog(`${job.recording_name || "Shot"}: ${job.state}`, job.message);
-  shotActivity.textContent = `${isActiveJob(job) ? "Running" : "Latest activity"}: ${jobTitle(job)} ${isActiveJob(job) ? `${job.progress}%` : ""}. ${job.message}`;
-  shotActivity.className = `shot-activity ${isActiveJob(job) ? "is-running" : ""} ${job.state === "failed" ? "is-failed" : ""}`;
+  const selectedShot = recordingsCache.find((recording) => recording.id === job.shot_id);
+  if (selectedShot) {
+    renderShotActivity({ ...selectedShot, latest_job: job });
+  } else {
+    shotActivity.textContent = `${isActiveJob(job) ? "Running" : "Latest activity"}: ${jobTitle(job)} ${isActiveJob(job) ? `${job.progress}%` : ""}. ${job.message}`;
+    shotActivity.className = `shot-activity ${isActiveJob(job) ? "is-running" : ""} ${job.state === "failed" ? "is-failed" : ""}`;
+  }
 
   if (job.state === "complete") {
     clearInterval(pollTimer);

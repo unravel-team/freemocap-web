@@ -576,13 +576,29 @@ button:focus-visible,
   gap: 12px;
 }
 
-.section-title-row span {
+.section-title-row .state-pill {
   border-radius: 999px;
   padding: 4px 8px;
-  background: oklch(0.9 0.045 155);
-  color: oklch(0.32 0.07 155);
+  background: oklch(0.94 0.006 220);
+  color: var(--muted);
   font-size: 11px;
   font-weight: 800;
+}
+
+.section-title-row .state-pill.is-ready,
+.section-title-row .state-pill.is-done {
+  background: oklch(0.9 0.045 155);
+  color: oklch(0.32 0.07 155);
+}
+
+.section-title-row .state-pill.is-running {
+  background: oklch(0.92 0.045 205);
+  color: oklch(0.3 0.075 205);
+}
+
+.section-title-row .state-pill.is-failed {
+  background: oklch(0.92 0.055 25);
+  color: oklch(0.45 0.13 25);
 }
 
 .calibration-workbench,
@@ -759,6 +775,55 @@ button:focus-visible,
   border-color: oklch(0.66 0.1 190);
   background: oklch(0.92 0.035 190);
   color: oklch(0.28 0.08 205);
+}
+
+.pose-output-progress:empty {
+  display: none;
+}
+
+.pose-inline-clips:empty {
+  display: none;
+}
+
+.pose-output-list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pose-output-list div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 9px 10px;
+  background: oklch(0.985 0.004 220);
+}
+
+.pose-output-list div.is-done {
+  border-color: oklch(0.74 0.07 155);
+  background: oklch(0.93 0.035 155);
+}
+
+.pose-output-list div.is-partial {
+  border-color: oklch(0.74 0.07 85);
+  background: oklch(0.95 0.035 90);
+}
+
+.pose-output-list span,
+.pose-output-list small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.pose-output-list strong {
+  font-size: 13px;
 }
 
 .calibration-preview-panel {
@@ -1040,6 +1105,34 @@ button:focus-visible,
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.pose-clip-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.inline-preview-section {
+  display: grid;
+  gap: 9px;
+}
+
+.inline-preview-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.inline-preview-heading strong {
+  font-size: 13px;
+}
+
+.inline-preview-heading span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .linked-player {
@@ -1489,7 +1582,8 @@ output {
   }
 
   .calibration-stage,
-  .motion-stage {
+  .motion-stage,
+  .pose-output-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1499,6 +1593,10 @@ output {
   }
 
   .debug-frame-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pose-clip-grid {
     grid-template-columns: 1fr;
   }
 
