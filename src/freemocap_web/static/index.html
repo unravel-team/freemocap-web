@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FreeMoCap Web</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260511-pose-3d" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260511-tab-state" />
   </head>
   <body>
     <section class="onboarding-screen" id="projectOnboarding">
@@ -136,19 +136,23 @@
               </div>
             </dl>
 
-            <section class="detail-section">
-              <h3>Videos</h3>
-              <div id="selectedShotVideos" class="video-list"></div>
-            </section>
-
             <div class="detail-tabs" role="tablist" aria-label="Shot workflow">
-              <button class="is-active" type="button" role="tab" aria-selected="true" data-detail-tab="calibration">Calibration</button>
+              <button class="is-active" type="button" role="tab" aria-selected="true" data-detail-tab="sync">Sync</button>
+              <button type="button" role="tab" aria-selected="false" data-detail-tab="calibration">Calibration</button>
               <button type="button" role="tab" aria-selected="false" data-detail-tab="calibration-result">Calibration result</button>
               <button type="button" role="tab" aria-selected="false" data-detail-tab="pose">Pose estimation</button>
               <button type="button" role="tab" aria-selected="false" data-detail-tab="pose-result">Pose result</button>
             </div>
 
-            <section class="detail-section calibration-workbench" id="calibrationWorkbench" data-detail-tab-panel="calibration">
+            <section class="detail-section sync-workbench" data-detail-tab-panel="sync">
+              <div class="section-title-row">
+                <h3>Sync</h3>
+                <span>Browser playback</span>
+              </div>
+              <div id="selectedShotVideos" class="video-list"></div>
+            </section>
+
+            <section class="detail-section calibration-workbench" id="calibrationWorkbench" data-detail-tab-panel="calibration" hidden>
               <div class="section-title-row">
                 <h3>Calibration</h3>
                 <span id="calibrationState">Waiting for sync</span>
@@ -268,6 +272,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260511-pose-3d" type="module"></script>
+    <script src="/static/app.js?v=20260511-tab-state" type="module"></script>
   </body>
 </html>

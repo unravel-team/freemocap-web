@@ -503,14 +503,17 @@ button:focus-visible,
 }
 
 .detail-tabs button {
+  display: grid;
+  gap: 2px;
   border: 0;
   border-bottom: 2px solid transparent;
   border-radius: 0;
-  padding: 9px 6px 10px;
+  padding: 8px 6px 9px;
   background: transparent;
   color: var(--muted);
   font-size: 13px;
   font-weight: 750;
+  text-align: left;
 }
 
 .detail-tabs button:hover {
@@ -520,6 +523,33 @@ button:focus-visible,
 .detail-tabs button.is-active {
   border-bottom-color: var(--accent);
   color: var(--text);
+}
+
+.detail-tabs button em {
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.detail-tabs button em.is-ready,
+.detail-tabs button em.is-running {
+  color: oklch(0.36 0.09 200);
+}
+
+.detail-tabs button em.is-done {
+  color: oklch(0.36 0.08 155);
+}
+
+.detail-tabs button em.is-blocked,
+.detail-tabs button em.is-muted {
+  color: oklch(0.52 0.018 220);
+}
+
+.detail-tabs button em.is-failed {
+  color: oklch(0.48 0.16 28);
 }
 
 [data-detail-tab-panel][hidden] {

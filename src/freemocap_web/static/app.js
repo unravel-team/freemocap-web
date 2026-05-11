@@ -69,7 +69,8 @@ let selectedShotId = null;
 let recordingsCache = [];
 let activeView = null;
 let lastGroundPlaneVideo = null;
-let activeDetailTab = "calibration";
+let activeDetailTab = "sync";
+let detailTabTouched = false;
 
 function defaultRecordingName() {
   const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "_");
@@ -122,9 +123,99 @@ function showDetailTab(tabName) {
   detailTabPanels.forEach((panel) => {
     panel.hidden = panel.dataset.detailTabPanel !== tabName;
   });
-  if (tabName === "pose-result") {
+  if (tabName === "pose-result" || tabName === "sync") {
     requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
   }
+}
+
+function hasRunningJob(shot) {
+  return ["queued", "running"].includes(shot.latest_job?.state);
+}
+
+function tabStatus(text, className = "") {
+  return { text, className };
+}
+
+function workflowTabStates(shot) {
+  const job = shot.latest_job;
+  const running = hasRunningJob(shot);
+  const hasSync = syncedVideoCount(shot) >= 1 || Boolean(shot.status?.synchronized_videos_status_check);
+  const hasMultiCamSync = syncedVideoCount(shot) >= 2;
+  const hasCalibration = Boolean(shot.status?.calibration_toml_check);
+  const hasPose = Boolean(shot.status?.data3d_status_check || shot.motion_capture_artifact?.data3d);
+
+  const states = {
+    sync: hasSync ? tabStatus("Done", "is-done") : tabStatus("Needed", "is-needed"),
+    calibration: hasMultiCamSync ? tabStatus("Ready", "is-ready") : tabStatus("Blocked", "is-blocked"),
+    "calibration-result": hasCalibration ? tabStatus("Ready", "is-done") : tabStatus("Empty", "is-muted"),
+    pose: hasCalibration || syncedVideoCount(shot) === 1 ? tabStatus("Ready", "is-ready") : tabStatus("Blocked", "is-blocked"),
+    "pose-result": hasPose ? tabStatus("Ready", "is-done") : tabStatus("Empty", "is-muted"),
+  };
+
+  if (hasCalibration) {
+    states.calibration = tabStatus("Done", "is-done");
+  }
+  if (hasPose) {
+    states.pose = tabStatus("Done", "is-done");
+  }
+  if (shot.calibration_preview_ready) {
+    states["calibration-result"] = tabStatus("Preview", "is-done");
+  }
+  if (shot.pose_preview_ready) {
+    states["pose-result"] = tabStatus("Preview", "is-done");
+  }
+  if (job?.state === "failed") {
+    const failedTab = job.type === "calibration" ? "calibration" : job.type === "motion_capture" ? "pose" : "sync";
+    states[failedTab] = tabStatus("Failed", "is-failed");
+  }
+  if (running) {
+    const runningTab = job.type === "calibration" ? "calibration" : job.type === "motion_capture" ? "pose" : "sync";
+    states[runningTab] = tabStatus(`${job.progress}%`, "is-running");
+  }
+
+  return states;
+}
+
+function relevantTabForShot(shot) {
+  const job = shot.latest_job;
+  const hasSync = syncedVideoCount(shot) >= 1 || Boolean(shot.status?.synchronized_videos_status_check);
+  const hasCalibration = Boolean(shot.status?.calibration_toml_check);
+  const hasPose = Boolean(shot.status?.data3d_status_check || shot.motion_capture_artifact?.data3d);
+
+  if (["queued", "running"].includes(job?.state)) {
+    if (job.type === "calibration") return "calibration";
+    if (job.type === "motion_capture") return "pose";
+    return "sync";
+  }
+  if (job?.state === "failed") {
+    if (job.type === "calibration") return "calibration";
+    if (job.type === "motion_capture") return "pose";
+    return "sync";
+  }
+  if (hasPose) return "pose-result";
+  if (hasCalibration) return "calibration-result";
+  if (hasSync) return "calibration";
+  return "sync";
+}
+
+function updateDetailTabs(shot) {
+  const labels = {
+    sync: "Sync",
+    calibration: "Calibration",
+    "calibration-result": "Calibration result",
+    pose: "Pose estimation",
+    "pose-result": "Pose result",
+  };
+  const states = workflowTabStates(shot);
+
+  detailTabButtons.forEach((button) => {
+    const tabName = button.dataset.detailTab;
+    const state = states[tabName] || tabStatus("", "");
+    button.innerHTML = `
+      <span>${labels[tabName]}</span>
+      <em class="${state.className}">${state.text}</em>
+    `;
+  });
 }
 
 function renderVideos() {
@@ -914,7 +1005,9 @@ function selectCreateShot() {
 function selectShot(shotId) {
   activeView = "detail";
   if (selectedShotId !== shotId) {
-    activeDetailTab = "calibration";
+    const shot = recordingsCache.find((recording) => recording.id === shotId);
+    activeDetailTab = shot ? relevantTabForShot(shot) : "sync";
+    detailTabTouched = false;
   }
   selectedShotId = shotId;
   createShotPanel.classList.add("is-hidden");
@@ -970,6 +1063,10 @@ function renderSelectedShot() {
   ensureBrowserPreviews(shot);
   renderCalibrationWorkbench(shot);
   renderMotionWorkbench(shot);
+  if (!detailTabTouched || hasRunningJob(shot)) {
+    activeDetailTab = relevantTabForShot(shot);
+  }
+  updateDetailTabs(shot);
   showDetailTab(activeDetailTab);
 
   if (!job) {
@@ -1055,6 +1152,7 @@ async function pollJob(jobId) {
       motionStatus.textContent = job.message;
     }
     activeJobId = null;
+    detailTabTouched = false;
     await refresh();
     return;
   }
@@ -1070,6 +1168,7 @@ async function pollJob(jobId) {
       syncStatus.innerHTML = `<span class="error">${job.message}</span>`;
     }
     activeJobId = null;
+    detailTabTouched = false;
     await refresh();
     setBusy(false);
   }
@@ -1109,7 +1208,10 @@ fileInput.addEventListener("change", renderVideos);
 refreshButton.addEventListener("click", refresh);
 detailRefreshButton.addEventListener("click", refresh);
 detailTabButtons.forEach((button) => {
-  button.addEventListener("click", () => showDetailTab(button.dataset.detailTab));
+  button.addEventListener("click", () => {
+    detailTabTouched = true;
+    showDetailTab(button.dataset.detailTab);
+  });
 });
 pickGroundPlaneFrameButton.addEventListener("click", pickGroundPlaneFrameFromPlayer);
 
@@ -1152,6 +1254,8 @@ form.addEventListener("submit", async (event) => {
     activeJobId = job.id;
     selectedShotId = job.shot_id;
     activeView = "detail";
+    activeDetailTab = "sync";
+    detailTabTouched = false;
     createShotPanel.classList.add("is-hidden");
     shotDetailPanel.classList.remove("is-hidden");
     setDetailProgress(job.progress, "Queued", job.message);
@@ -1190,6 +1294,8 @@ calibrationForm.addEventListener("submit", async (event) => {
 
   clearInterval(pollTimer);
   pollTimer = null;
+  activeDetailTab = "calibration";
+  detailTabTouched = false;
   calibrationButton.disabled = true;
   calibrationStatus.textContent = "Queued FreeMoCap calibration.";
   setDetailProgress(10, "Queued", "Queued FreeMoCap calibration.");
@@ -1230,6 +1336,8 @@ motionButton.addEventListener("click", async () => {
 
   clearInterval(pollTimer);
   pollTimer = null;
+  activeDetailTab = "pose";
+  detailTabTouched = false;
   motionButton.disabled = true;
   motionStatus.textContent = "Queued FreeMoCap pose estimation.";
   setDetailProgress(10, "Queued", "Queued FreeMoCap pose estimation.");
