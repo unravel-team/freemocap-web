@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FreeMoCap Web</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260511-linked-players-fallback" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260511-pose-3d" />
   </head>
   <body>
     <section class="onboarding-screen" id="projectOnboarding">
@@ -141,6 +141,110 @@
               <div id="selectedShotVideos" class="video-list"></div>
             </section>
 
+            <div class="detail-tabs" role="tablist" aria-label="Shot workflow">
+              <button class="is-active" type="button" role="tab" aria-selected="true" data-detail-tab="calibration">Calibration</button>
+              <button type="button" role="tab" aria-selected="false" data-detail-tab="calibration-result">Calibration result</button>
+              <button type="button" role="tab" aria-selected="false" data-detail-tab="pose">Pose estimation</button>
+              <button type="button" role="tab" aria-selected="false" data-detail-tab="pose-result">Pose result</button>
+            </div>
+
+            <section class="detail-section calibration-workbench" id="calibrationWorkbench" data-detail-tab-panel="calibration">
+              <div class="section-title-row">
+                <h3>Calibration</h3>
+                <span id="calibrationState">Waiting for sync</span>
+              </div>
+              <form id="calibrationForm" class="calibration-form">
+                <div class="controls-row">
+                  <label class="field">
+                    <span>Board</span>
+                    <select id="charucoBoardName" name="charuco_board_name">
+                      <option value="7x5 Charuco">7x5 ChArUco</option>
+                      <option value="5x3 Charuco">5x3 ChArUco</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Square size (mm)</span>
+                    <input id="charucoSquareSize" name="charuco_square_size_mm" type="number" min="1" step="0.1" value="39" />
+                  </label>
+                </div>
+                <fieldset class="ground-plane-field">
+                  <legend>Ground plane</legend>
+                  <div class="ground-plane-options">
+                    <label>
+                      <input type="radio" name="ground_plane_mode" value="camera" checked />
+                      <span>
+                        <strong>Camera 0</strong>
+                        <small>Use the first camera as the world origin.</small>
+                      </span>
+                    </label>
+                    <label>
+                      <input id="useCharucoGroundplane" type="radio" name="ground_plane_mode" value="charuco" />
+                      <span>
+                        <strong>ChArUco board</strong>
+                        <small>Use the board's starting pose as the floor plane.</small>
+                      </span>
+                    </label>
+                  </div>
+                  <label class="field ground-plane-frame-field">
+                    <span>Ground-plane frame</span>
+                    <div class="frame-picker-row">
+                      <input id="groundPlaneFrame" name="ground_plane_frame" type="number" min="0" step="1" value="0" />
+                      <button class="secondary" id="pickGroundPlaneFrameButton" type="button">Use current player frame</button>
+                    </div>
+                    <small>Frame where the ChArUco board is on the floor. Use 0 to let FreeMoCap search from the start.</small>
+                  </label>
+                </fieldset>
+                <div class="calibration-stage" id="calibrationStage">
+                  <span data-stage="sync">Synced videos</span>
+                  <span data-stage="detect">Detect board</span>
+                  <span data-stage="solve">Solve cameras</span>
+                  <span data-stage="save">Save TOML</span>
+                </div>
+                <div class="actions compact-actions">
+                  <button class="primary" id="calibrationButton" type="submit" disabled>Run calibration</button>
+                  <output id="calibrationStatus"></output>
+                </div>
+              </form>
+            </section>
+
+            <section class="detail-section calibration-preview-panel" data-detail-tab-panel="calibration-result" hidden>
+              <div class="section-title-row">
+                <h3>Calibration result</h3>
+                <button class="secondary" id="calibrationPreviewButton" type="button" disabled>Build overlay</button>
+              </div>
+              <div id="calibrationResultArtifact"></div>
+              <div id="calibrationPreviewStatus" class="preview-status">Sync videos before building an overlay preview.</div>
+              <div id="calibrationPreviewPlayer" class="video-list"></div>
+            </section>
+
+            <section class="detail-section motion-workbench" id="motionWorkbench" data-detail-tab-panel="pose" hidden>
+              <div class="section-title-row">
+                <h3>Pose estimation</h3>
+                <span id="motionState">Waiting for calibration</span>
+              </div>
+              <div class="motion-stage" id="motionStage">
+                <span data-stage="track">2D tracking</span>
+                <span data-stage="triangulate">Triangulation</span>
+                <span data-stage="postprocess">Post-process</span>
+                <span data-stage="save">Save outputs</span>
+              </div>
+              <div class="actions compact-actions">
+                <button class="primary" id="motionButton" type="button" disabled>Run pose estimation</button>
+                <output id="motionStatus"></output>
+              </div>
+            </section>
+
+            <section class="detail-section motion-workbench" data-detail-tab-panel="pose-result" hidden>
+              <div class="section-title-row">
+                <h3>Pose result</h3>
+                <button class="secondary" id="posePreviewButton" type="button" disabled>Build preview</button>
+              </div>
+              <div id="motionResultArtifact"></div>
+              <div id="pose3dViewer" class="pose3d-root"></div>
+              <div id="posePreviewStatus" class="preview-status">Run pose estimation before building a preview.</div>
+              <div id="posePreviewPlayer" class="video-list"></div>
+            </section>
+
             <section class="detail-section" id="selectedJobSection">
               <h3>Latest job</h3>
               <div class="progress-panel" aria-live="polite">
@@ -164,6 +268,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260511-linked-players-fallback" type="module"></script>
+    <script src="/static/app.js?v=20260511-pose-3d" type="module"></script>
   </body>
 </html>
