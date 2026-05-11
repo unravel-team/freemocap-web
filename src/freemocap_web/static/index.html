@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FreeMoCap Web</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260511-tab-state" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260512-ground-plane-scrub" />
   </head>
   <body>
     <section class="onboarding-screen" id="projectOnboarding">
@@ -117,6 +117,7 @@
               <div>
                 <span class="metadata-label">Shot</span>
                 <h2 id="selectedShotName">Select a shot</h2>
+                <p class="shot-activity" id="shotActivity">No activity yet</p>
               </div>
               <button class="secondary" id="detailRefreshButton" type="button">Refresh</button>
             </div>
@@ -149,6 +150,7 @@
                 <h3>Sync</h3>
                 <span>Browser playback</span>
               </div>
+              <div class="step-progress" id="syncJobProgress" hidden></div>
               <div id="selectedShotVideos" class="video-list"></div>
             </section>
 
@@ -193,10 +195,10 @@
                     <span>Ground-plane frame</span>
                     <div class="frame-picker-row">
                       <input id="groundPlaneFrame" name="ground_plane_frame" type="number" min="0" step="1" value="0" />
-                      <button class="secondary" id="pickGroundPlaneFrameButton" type="button">Use current player frame</button>
                     </div>
                     <small>Frame where the ChArUco board is on the floor. Use 0 to let FreeMoCap search from the start.</small>
                   </label>
+                  <div class="ground-plane-picker" id="groundPlanePicker"></div>
                 </fieldset>
                 <div class="calibration-stage" id="calibrationStage">
                   <span data-stage="sync">Synced videos</span>
@@ -204,6 +206,7 @@
                   <span data-stage="solve">Solve cameras</span>
                   <span data-stage="save">Save TOML</span>
                 </div>
+                <div class="step-progress" id="calibrationJobProgress" hidden></div>
                 <div class="actions compact-actions">
                   <button class="primary" id="calibrationButton" type="submit" disabled>Run calibration</button>
                   <output id="calibrationStatus"></output>
@@ -232,6 +235,7 @@
                 <span data-stage="postprocess">Post-process</span>
                 <span data-stage="save">Save outputs</span>
               </div>
+              <div class="step-progress" id="motionJobProgress" hidden></div>
               <div class="actions compact-actions">
                 <button class="primary" id="motionButton" type="button" disabled>Run pose estimation</button>
                 <output id="motionStatus"></output>
@@ -249,29 +253,11 @@
               <div id="posePreviewPlayer" class="video-list"></div>
             </section>
 
-            <section class="detail-section" id="selectedJobSection">
-              <h3>Latest job</h3>
-              <div class="progress-panel" aria-live="polite">
-                <div class="progress-header">
-                  <strong id="detailProgressTitle">No job selected</strong>
-                  <span id="detailProgressPercent">0%</span>
-                </div>
-                <div class="progress-track">
-                  <div class="progress-fill" id="detailProgressFill"></div>
-                </div>
-                <div class="progress-message" id="detailProgressMessage">Select or create a shot to see job state.</div>
-              </div>
-              <div class="job-log" aria-label="Selected shot job log">
-                <strong>Job log</strong>
-                <code id="detailLogLineOne">No job selected</code>
-                <code id="detailLogLineTwo">Waiting for activity</code>
-              </div>
-            </section>
           </section>
         </section>
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260511-tab-state" type="module"></script>
+    <script src="/static/app.js?v=20260512-ground-plane-scrub" type="module"></script>
   </body>
 </html>

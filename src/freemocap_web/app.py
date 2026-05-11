@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -199,6 +199,25 @@ def _update_job(job_id: str, **updates: object) -> None:
     values = list(fields.values()) + [job_id]
     with DB_LOCK, _db() as connection:
         connection.execute(f"UPDATE jobs SET {assignments} WHERE id = ?", values)
+
+
+def _invalidate_downstream_jobs(shot_id: str) -> None:
+    timestamp = _now()
+    with DB_LOCK, _db() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET state = 'invalidated',
+                progress = 0,
+                message = 'Reset after manual video resync.',
+                error = NULL,
+                updated_at = ?
+            WHERE shot_id = ?
+                AND type IN ('calibration', 'motion_capture')
+                AND state IN ('queued', 'running', 'complete', 'failed')
+            """,
+            (timestamp, shot_id),
+        )
 
 
 def _get_job_row(job_id: str) -> dict | None:
@@ -409,8 +428,14 @@ def _shot_to_recording(shot: dict) -> dict:
     recording["purpose"] = shot["purpose"]
     recording["created_at"] = shot["created_at"]
     recording["updated_at"] = shot["updated_at"]
+    raw_videos_path = Path(shot["raw_videos_path"])
+    recording["raw_videos"] = sorted(path.name for path in raw_videos_path.glob("*.mp4")) if raw_videos_path.exists() else []
     browser_videos_path = Path(shot["synchronized_videos_path"]) / BROWSER_PREVIEW_VIDEOS_FOLDER_NAME
-    recording["browser_videos"] = sorted(path.name for path in browser_videos_path.glob("*.mp4")) if browser_videos_path.exists() else []
+    recording["browser_videos"] = (
+        sorted(path.name for path in browser_videos_path.glob("*.mp4") if not path.name.endswith(".tmp.mp4"))
+        if browser_videos_path.exists()
+        else []
+    )
     preview_assets = list(browser_videos_path.glob("*.mp4")) + list(browser_videos_path.glob("*.jpg")) if browser_videos_path.exists() else []
     recording["browser_preview_updated_at"] = max((path.stat().st_mtime_ns for path in preview_assets), default=None)
     preview_version_path = browser_videos_path / ".preview-version"
@@ -810,13 +835,21 @@ def _create_browser_preview_videos(synchronized_folder: Path, force: bool = Fals
     return preview_paths
 
 
-def _create_side_by_side_preview(preview_paths: list[Path], preview_folder: Path, force: bool = False) -> Path:
+def _create_side_by_side_preview(
+    preview_paths: list[Path],
+    preview_folder: Path,
+    force: bool = False,
+    *,
+    tile_width: int = 640,
+    crf: int = 23,
+    profile: str = "baseline",
+    level: str = "4.0",
+) -> Path:
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path is None:
         raise HTTPException(status_code=400, detail="FFmpeg is required for side-by-side previews and was not found.")
 
     output_path = preview_folder / "side_by_side.mp4"
-    poster_path = output_path.with_suffix(".jpg")
     newest_input_mtime = max(path.stat().st_mtime for path in preview_paths)
     if not force and output_path.exists() and output_path.stat().st_mtime >= newest_input_mtime:
         _create_browser_preview_poster(output_path)
@@ -830,7 +863,7 @@ def _create_side_by_side_preview(preview_paths: list[Path], preview_folder: Path
         command.extend(["-i", str(input_path)])
 
     scaled_streams = "".join(
-        f"[{index}:v]fps=30,scale=640:-2,setsar=1,setpts=PTS-STARTPTS[v{index}];"
+        f"[{index}:v]fps=30,scale={tile_width}:-2,setsar=1,setpts=PTS-STARTPTS[v{index}];"
         for index in range(len(input_paths))
     )
     if len(input_paths) == 2:
@@ -855,11 +888,11 @@ def _create_side_by_side_preview(preview_paths: list[Path], preview_folder: Path
             "-preset",
             "veryfast",
             "-crf",
-            "23",
+            str(crf),
             "-profile:v",
-            "baseline",
+            profile,
             "-level",
-            "4.0",
+            level,
             "-pix_fmt",
             "yuv420p",
             "-r",
@@ -912,6 +945,131 @@ def _create_browser_preview_poster(preview_video_path: Path) -> Path:
     subprocess.run(command, check=True, capture_output=True, text=True)
     temporary_output.replace(poster_path)
     return poster_path
+
+
+def _clear_downstream_artifacts(recording_folder: Path) -> None:
+    for folder_name in ["output_data", ANNOTATED_VIDEOS_FOLDER_NAME]:
+        shutil.rmtree(recording_folder / folder_name, ignore_errors=True)
+
+    synchronized_folder = recording_folder / SYNCHRONIZED_VIDEOS_FOLDER_NAME
+    for folder_name in [BROWSER_PREVIEW_VIDEOS_FOLDER_NAME, CALIBRATION_PREVIEW_VIDEOS_FOLDER_NAME]:
+        shutil.rmtree(synchronized_folder / folder_name, ignore_errors=True)
+
+    for toml_path in recording_folder.glob("*.toml"):
+        toml_path.unlink(missing_ok=True)
+
+
+def _probe_video_frame_count(video_path: Path) -> int:
+    ffprobe_path = shutil.which("ffprobe")
+    if ffprobe_path is None:
+        raise HTTPException(status_code=400, detail="FFprobe is required for manual resync and was not found.")
+
+    command = [
+        ffprobe_path,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=nb_frames,duration,avg_frame_rate",
+        "-of",
+        "default=noprint_wrappers=1",
+        str(video_path),
+    ]
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+    values = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key] = value
+
+    if values.get("nb_frames", "").isdigit():
+        return int(values["nb_frames"])
+
+    duration = float(values.get("duration") or 0)
+    rate = values.get("avg_frame_rate") or "30/1"
+    numerator, _, denominator = rate.partition("/")
+    fps = float(numerator or 30) / float(denominator or 1)
+    return max(0, round(duration * fps))
+
+
+def _manual_resync_videos(synchronized_folder: Path, frame_offsets: dict[str, int], fps: float = 30.0) -> None:
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        raise HTTPException(status_code=400, detail="FFmpeg is required for manual resync and was not found.")
+
+    source_videos = sorted(
+        path for path in synchronized_folder.glob("*.mp4") if path.parent.name != BROWSER_PREVIEW_VIDEOS_FOLDER_NAME
+    )
+    if not source_videos:
+        raise HTTPException(status_code=400, detail="No synchronized videos found to resync.")
+
+    unknown_names = sorted(set(frame_offsets) - {path.name for path in source_videos})
+    if unknown_names:
+        raise HTTPException(status_code=400, detail=f"Unknown video offset key: {unknown_names[0]}")
+
+    temp_folder = synchronized_folder.with_name(f"{synchronized_folder.name}_manual_resync_{uuid.uuid4().hex}")
+    temp_folder.mkdir(parents=True, exist_ok=False)
+    safe_fps = max(1.0, float(fps or 30.0))
+    target_frame_count = min(_probe_video_frame_count(path) for path in source_videos)
+    try:
+        for source_video in source_videos:
+            offset_frames = int(frame_offsets.get(source_video.name, 0))
+            output_path = temp_folder / source_video.name
+            offset_seconds = abs(offset_frames) / safe_fps
+            if offset_frames > 0:
+                video_filter = (
+                    f"trim=start_frame={offset_frames},setpts=PTS-STARTPTS,"
+                    f"tpad=stop_duration={offset_seconds:.6f}:stop_mode=clone,"
+                    f"trim=end_frame={target_frame_count},setpts=PTS-STARTPTS"
+                )
+            elif offset_frames < 0:
+                video_filter = (
+                    f"tpad=start_duration={offset_seconds:.6f}:start_mode=clone,"
+                    f"trim=end_frame={target_frame_count},setpts=PTS-STARTPTS"
+                )
+            else:
+                video_filter = f"trim=end_frame={target_frame_count},setpts=PTS-STARTPTS"
+            command = [
+                ffmpeg_path,
+                "-y",
+                "-i",
+                str(source_video),
+                "-vf",
+                video_filter,
+            ]
+            command.extend(
+                [
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "18",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-r",
+                    f"{safe_fps:g}",
+                    "-g",
+                    f"{int(safe_fps):g}",
+                    "-frames:v",
+                    str(target_frame_count),
+                    "-movflags",
+                    "+faststart",
+                    "-an",
+                    str(output_path),
+                ]
+            )
+            subprocess.run(command, check=True, capture_output=True, text=True)
+
+        for existing_video in source_videos:
+            existing_video.unlink(missing_ok=True)
+        for resynced_video in sorted(temp_folder.glob("*.mp4")):
+            resynced_video.replace(synchronized_folder / resynced_video.name)
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=500, detail=f"Manual resync failed: {exc.stderr[-1200:]}") from exc
+    finally:
+        shutil.rmtree(temp_folder, ignore_errors=True)
 
 
 def _parse_calibration_job_method(method: str | None) -> tuple[str, float]:
@@ -1366,6 +1524,25 @@ def _run_sync_job(job_id: str, raw_folder: Path, synchronized_folder: Path, meth
         _set_job(job_id, state="failed", progress=100, message=str(exc))
 
 
+def _run_manual_resync_job(job_id: str, shot_id: str, frame_offsets: dict[str, int]) -> None:
+    try:
+        shot = _get_shot(shot_id)
+        recording_folder = Path(shot["recording_path"])
+        synchronized_folder = Path(shot["synchronized_videos_path"])
+        _set_job(job_id, state="running", progress=20, message="Applying frame offsets to synchronized videos.")
+        _invalidate_downstream_jobs(shot_id)
+        _manual_resync_videos(synchronized_folder, frame_offsets)
+        _set_job(job_id, progress=65, message="Clearing calibration and pose outputs from the previous sync.")
+        _clear_downstream_artifacts(recording_folder)
+        _set_job(job_id, progress=82, message="Rebuilding browser playback previews.")
+        _create_browser_preview_videos(synchronized_folder, force=True)
+        recording = _shot_to_recording(_get_shot(shot_id))
+        _set_job(job_id, state="complete", progress=100, message="Manual frame resync complete.", recording=recording)
+    except Exception as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        _set_job(job_id, state="failed", progress=100, message=detail, error=detail)
+
+
 def _calibration_progress_from_message(message: str, current_progress: int) -> tuple[int, str]:
     normalized = message.lower()
     if "successful" in normalized:
@@ -1449,7 +1626,15 @@ def _run_motion_capture_job(job_id: str, shot_id: str, recording_folder: Path, m
             _set_job(job_id, progress=94, message="Creating pose preview.")
             for annotated_video in annotated_videos:
                 _create_browser_preview_poster(annotated_video)
-            _create_side_by_side_preview(annotated_videos, annotated_folder, force=True)
+            _create_side_by_side_preview(
+                annotated_videos,
+                annotated_folder,
+                force=True,
+                tile_width=1280,
+                crf=18,
+                profile="high",
+                level="5.0",
+            )
         stop_monitor.set()
         monitor.join(timeout=1)
         recording = _status_for_recording(recording_folder)
@@ -1721,6 +1906,59 @@ def get_job(job_id: str) -> dict:
     return {"job": _get_job(job_id)}
 
 
+@app.post("/api/shots/{shot_id}/manual-resync-jobs")
+def create_manual_resync_job(shot_id: str, payload: Annotated[dict, Body()]) -> dict:
+    shot = _get_shot(shot_id)
+    synchronized_folder = Path(shot["synchronized_videos_path"])
+    synced_videos = sorted(synchronized_folder.glob("*.mp4")) if synchronized_folder.exists() else []
+    if not synced_videos:
+        raise HTTPException(status_code=400, detail="Run synchronization before manual frame resync.")
+
+    latest_job = _latest_job_for_shot(shot_id)
+    if latest_job and latest_job["state"] in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="Wait for the current job to finish before manual resync.")
+
+    raw_offsets = payload.get("offsets") if isinstance(payload, dict) else None
+    if not isinstance(raw_offsets, dict):
+        raise HTTPException(status_code=400, detail="Manual resync requires an offsets object.")
+    frame_offsets = {
+        str(name): max(-3000, min(3000, int(value)))
+        for name, value in raw_offsets.items()
+    }
+
+    job_id = uuid.uuid4().hex
+    method = ", ".join(f"{name}: {offset:+d}f" for name, offset in sorted(frame_offsets.items())) or "no offsets"
+    _insert_job(
+        job_id,
+        shot_id,
+        job_type="manual_resync",
+        method=method,
+        message="Queued manual frame resync.",
+        progress=10,
+    )
+    with SYNC_JOBS_LOCK:
+        SYNC_JOBS[job_id] = {
+            "id": job_id,
+            "state": "queued",
+            "progress": 10,
+            "message": "Queued manual frame resync.",
+            "shot_id": shot_id,
+            "recording_name": shot["name"],
+            "recording_path": shot["recording_path"],
+            "method": method,
+            "type": "manual_resync",
+            "recording": None,
+        }
+
+    worker = threading.Thread(
+        target=_run_manual_resync_job,
+        args=(job_id, shot_id, frame_offsets),
+        daemon=True,
+    )
+    worker.start()
+    return {"job": _get_job(job_id)}
+
+
 @app.post("/api/shots/{shot_id}/calibration-jobs")
 def create_calibration_job(
     shot_id: str,
@@ -1855,7 +2093,15 @@ def create_pose_preview(shot_id: str, force: bool = False) -> dict:
 
     for annotated_video in annotated_videos:
         _create_browser_preview_poster(annotated_video)
-    side_by_side = _create_side_by_side_preview(annotated_videos, annotated_folder, force=force)
+    side_by_side = _create_side_by_side_preview(
+        annotated_videos,
+        annotated_folder,
+        force=force,
+        tile_width=1280,
+        crf=18,
+        profile="high",
+        level="5.0",
+    )
     return {
         "pose_preview_videos": [path.name for path in annotated_videos],
         "pose_side_by_side_video": side_by_side.name,

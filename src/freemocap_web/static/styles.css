@@ -331,6 +331,19 @@ h2 {
   line-height: 1.45;
 }
 
+.shot-activity {
+  max-width: 70ch;
+  font-size: 12px;
+}
+
+.shot-activity.is-running {
+  color: oklch(0.36 0.09 200);
+}
+
+.shot-activity.is-failed {
+  color: var(--danger);
+}
+
 .field {
   display: grid;
   gap: 7px;
@@ -680,6 +693,43 @@ button:focus-visible,
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.ground-plane-picker {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: oklch(0.998 0.004 220);
+}
+
+.ground-plane-picker-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 180px);
+  gap: 8px;
+}
+
+.ground-plane-picker-toolbar label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.ground-plane-picker video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  background: oklch(0.18 0.012 235);
+  object-fit: contain;
+}
+
+.ground-plane-picker .frame-scrubber {
+  width: 100%;
 }
 
 .calibration-stage,
@@ -1169,6 +1219,97 @@ button:focus-visible,
   min-height: 18px;
 }
 
+.step-progress {
+  display: grid;
+}
+
+.manual-resync {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: oklch(0.985 0.004 220);
+}
+
+.manual-resync-controls {
+  display: grid;
+  grid-template-columns: auto minmax(130px, 190px) minmax(180px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.manual-resync-controls label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.manual-resync-controls input,
+.frame-stepper input {
+  width: 100%;
+}
+
+.frame-scrubber {
+  align-self: center;
+  padding: 0;
+}
+
+.resync-camera-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.resync-camera {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: oklch(0.978 0.006 220);
+}
+
+.resync-camera video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: oklch(0.18 0.012 235);
+}
+
+.resync-camera-controls {
+  display: grid;
+  gap: 6px;
+  padding: 9px 10px 10px;
+}
+
+.resync-camera-controls strong {
+  font-size: 13px;
+}
+
+.resync-camera-controls span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.frame-stepper {
+  display: grid;
+  grid-template-columns: auto auto minmax(64px, 1fr) auto auto;
+  gap: 5px;
+  align-items: center;
+}
+
+.frame-stepper button {
+  min-height: 30px;
+  padding: 0 8px;
+}
+
 .combined-player {
   overflow: hidden;
   border: 1px solid var(--line);
@@ -1440,8 +1581,11 @@ output {
   .controls-row,
   .choice-group,
   .ground-plane-options,
+  .ground-plane-picker-toolbar,
   .linked-video-grid,
-  .linked-controls {
+  .linked-controls,
+  .manual-resync-controls,
+  .resync-camera-grid {
     grid-template-columns: 1fr;
   }
 

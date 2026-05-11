@@ -21,16 +21,14 @@ const syncButton = document.querySelector("#syncButton");
 const createShotPanel = document.querySelector("#syncForm");
 const shotDetailPanel = document.querySelector("#shotDetailPanel");
 const selectedShotName = document.querySelector("#selectedShotName");
+const shotActivity = document.querySelector("#shotActivity");
 const selectedShotPurpose = document.querySelector("#selectedShotPurpose");
 const selectedShotState = document.querySelector("#selectedShotState");
 const selectedShotVideoCount = document.querySelector("#selectedShotVideoCount");
 const selectedShotVideos = document.querySelector("#selectedShotVideos");
-const detailProgressTitle = document.querySelector("#detailProgressTitle");
-const detailProgressPercent = document.querySelector("#detailProgressPercent");
-const detailProgressFill = document.querySelector("#detailProgressFill");
-const detailProgressMessage = document.querySelector("#detailProgressMessage");
-const detailLogLineOne = document.querySelector("#detailLogLineOne");
-const detailLogLineTwo = document.querySelector("#detailLogLineTwo");
+const syncJobProgress = document.querySelector("#syncJobProgress");
+const calibrationJobProgress = document.querySelector("#calibrationJobProgress");
+const motionJobProgress = document.querySelector("#motionJobProgress");
 const progressTitle = document.querySelector("#progressTitle");
 const progressPercent = document.querySelector("#progressPercent");
 const progressFill = document.querySelector("#progressFill");
@@ -46,7 +44,7 @@ const charucoBoardName = document.querySelector("#charucoBoardName");
 const charucoSquareSize = document.querySelector("#charucoSquareSize");
 const useCharucoGroundplane = document.querySelector("#useCharucoGroundplane");
 const groundPlaneFrame = document.querySelector("#groundPlaneFrame");
-const pickGroundPlaneFrameButton = document.querySelector("#pickGroundPlaneFrameButton");
+const groundPlanePicker = document.querySelector("#groundPlanePicker");
 const calibrationPreviewButton = document.querySelector("#calibrationPreviewButton");
 const calibrationPreviewStatus = document.querySelector("#calibrationPreviewStatus");
 const calibrationPreviewPlayer = document.querySelector("#calibrationPreviewPlayer");
@@ -71,6 +69,52 @@ let activeView = null;
 let lastGroundPlaneVideo = null;
 let activeDetailTab = "sync";
 let detailTabTouched = false;
+const SHOT_UI_STORAGE_PREFIX = "freemocap-web-shot-ui:";
+
+function shotUiStateKey(shotId) {
+  return `${SHOT_UI_STORAGE_PREFIX}${shotId}`;
+}
+
+function loadShotUiState(shotId) {
+  if (!shotId) return {};
+  try {
+    return JSON.parse(localStorage.getItem(shotUiStateKey(shotId)) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveShotUiState(shotId, patch) {
+  if (!shotId) return;
+  const nextState = { ...loadShotUiState(shotId), ...patch };
+  localStorage.setItem(shotUiStateKey(shotId), JSON.stringify(nextState));
+}
+
+function applyShotUiState(shot) {
+  const state = loadShotUiState(shot.id);
+  if (state.calibration) {
+    if (state.calibration.charucoBoardName) charucoBoardName.value = state.calibration.charucoBoardName;
+    if (state.calibration.charucoSquareSize) charucoSquareSize.value = state.calibration.charucoSquareSize;
+    groundPlaneFrame.value = state.calibration.groundPlaneFrame ?? groundPlaneFrame.value;
+    useCharucoGroundplane.checked = state.calibration.groundPlaneMode === "charuco";
+    const cameraGroundPlane = calibrationForm.querySelector('input[name="ground_plane_mode"][value="camera"]');
+    if (cameraGroundPlane) {
+      cameraGroundPlane.checked = state.calibration.groundPlaneMode !== "charuco";
+    }
+  }
+}
+
+function persistCalibrationUiState() {
+  if (!selectedShotId) return;
+  saveShotUiState(selectedShotId, {
+    calibration: {
+      charucoBoardName: charucoBoardName.value,
+      charucoSquareSize: charucoSquareSize.value,
+      groundPlaneMode: useCharucoGroundplane.checked ? "charuco" : "camera",
+      groundPlaneFrame: groundPlaneFrame.value,
+    },
+  });
+}
 
 function defaultRecordingName() {
   const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "_");
@@ -100,21 +144,11 @@ function setCreateLog(lineOne, lineTwo) {
   logLineTwo.textContent = lineTwo;
 }
 
-function setDetailProgress(progress, title, message) {
-  const safeProgress = Math.max(0, Math.min(100, Number(progress) || 0));
-  detailProgressTitle.textContent = title;
-  detailProgressPercent.textContent = `${safeProgress}%`;
-  detailProgressFill.style.width = `${safeProgress}%`;
-  detailProgressMessage.textContent = message;
-}
-
-function setDetailLog(lineOne, lineTwo) {
-  detailLogLineOne.textContent = lineOne;
-  detailLogLineTwo.textContent = lineTwo;
-}
-
 function showDetailTab(tabName) {
   activeDetailTab = tabName;
+  if (selectedShotId) {
+    saveShotUiState(selectedShotId, { activeDetailTab: tabName });
+  }
   detailTabButtons.forEach((button) => {
     const selected = button.dataset.detailTab === tabName;
     button.classList.toggle("is-active", selected);
@@ -146,11 +180,31 @@ function workflowTabStates(shot) {
 
   const states = {
     sync: hasSync ? tabStatus("Done", "is-done") : tabStatus("Needed", "is-needed"),
-    calibration: hasMultiCamSync ? tabStatus("Ready", "is-ready") : tabStatus("Blocked", "is-blocked"),
-    "calibration-result": hasCalibration ? tabStatus("Ready", "is-done") : tabStatus("Empty", "is-muted"),
-    pose: hasCalibration || syncedVideoCount(shot) === 1 ? tabStatus("Ready", "is-ready") : tabStatus("Blocked", "is-blocked"),
-    "pose-result": hasPose ? tabStatus("Ready", "is-done") : tabStatus("Empty", "is-muted"),
+    calibration: hasMultiCamSync ? tabStatus("Pending", "is-ready") : tabStatus("Blocked", "is-blocked"),
+    "calibration-result": hasCalibration ? tabStatus("Ready", "is-done") : tabStatus("Pending", "is-muted"),
+    pose: hasCalibration || syncedVideoCount(shot) === 1 ? tabStatus("Pending", "is-ready") : tabStatus("Blocked", "is-blocked"),
+    "pose-result": hasPose ? tabStatus("Ready", "is-done") : tabStatus("Pending", "is-muted"),
   };
+
+  if (job?.type === "manual_resync" && ["queued", "running"].includes(job.state)) {
+    return {
+      sync: tabStatus(`${job.progress}%`, "is-running"),
+      calibration: tabStatus("Resetting", "is-muted"),
+      "calibration-result": tabStatus("Resetting", "is-muted"),
+      pose: tabStatus("Resetting", "is-muted"),
+      "pose-result": tabStatus("Resetting", "is-muted"),
+    };
+  }
+
+  if (job?.type === "manual_resync" && job.state === "complete") {
+    return {
+      sync: tabStatus("Done", "is-done"),
+      calibration: hasMultiCamSync ? tabStatus("Pending", "is-ready") : tabStatus("Blocked", "is-blocked"),
+      "calibration-result": tabStatus("Pending", "is-muted"),
+      pose: syncedVideoCount(shot) === 1 ? tabStatus("Pending", "is-ready") : tabStatus("Blocked", "is-blocked"),
+      "pose-result": tabStatus("Pending", "is-muted"),
+    };
+  }
 
   if (hasCalibration) {
     states.calibration = tabStatus("Done", "is-done");
@@ -192,6 +246,7 @@ function relevantTabForShot(shot) {
     if (job.type === "motion_capture") return "pose";
     return "sync";
   }
+  if (job?.state === "complete" && job.type === "manual_resync") return "sync";
   if (hasPose) return "pose-result";
   if (hasCalibration) return "calibration-result";
   if (hasSync) return "calibration";
@@ -316,9 +371,11 @@ function shotState(recording) {
   const hasCalibration = Boolean(recording.status?.calibration_toml_check);
   const hasMotionCapture = Boolean(recording.status?.data3d_status_check);
   if (job?.state === "failed") return { className: "failed", text: "Failed" };
+  if (job?.state === "invalidated") return { className: "", text: hasVideos ? "Synced" : "Draft" };
   if (["queued", "running"].includes(job?.state)) {
     if (job.type === "calibration") return { className: "pending", text: `Cal ${job.progress}%` };
     if (job.type === "motion_capture") return { className: "pending", text: `Pose ${job.progress}%` };
+    if (job.type === "manual_resync") return { className: "pending", text: `Resync ${job.progress}%` };
     return { className: "pending", text: `${job.progress}%` };
   }
   if (hasMotionCapture) return { className: "", text: "Pose ready" };
@@ -331,10 +388,69 @@ function jobTitle(job) {
   if (!job) return "No job";
   if (job.state === "complete") return "Complete";
   if (job.state === "failed") return "Failed";
+  if (job.state === "invalidated") return "Reset";
   if (job.state === "queued") return "Queued";
   if (job.type === "calibration") return "Calibrating";
   if (job.type === "motion_capture") return "Estimating pose";
+  if (job.type === "manual_resync") return "Resyncing";
   return "Syncing";
+}
+
+function jobStep(job) {
+  if (!job) return null;
+  if (job.type === "calibration") return "calibration";
+  if (job.type === "motion_capture") return "pose";
+  if (job.type === "sync" || job.type === "manual_resync") return "sync";
+  return null;
+}
+
+function isActiveJob(job) {
+  return ["queued", "running"].includes(job?.state);
+}
+
+function renderStepProgress(panel, job, step) {
+  if (!panel) return;
+  const active = isActiveJob(job) && jobStep(job) === step;
+  panel.hidden = !active;
+  if (!active) {
+    panel.innerHTML = "";
+    return;
+  }
+
+  const safeProgress = Math.max(0, Math.min(100, Number(job.progress) || 0));
+  panel.innerHTML = `
+    <div class="progress-panel" aria-live="polite">
+      <div class="progress-header">
+        <strong>${jobTitle(job)}</strong>
+        <span>${safeProgress}%</span>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" style="width:${safeProgress}%"></div>
+      </div>
+      <div class="progress-message">${job.message}</div>
+    </div>
+  `;
+}
+
+function renderStepProgressPanels(shot) {
+  const job = shot.latest_job;
+  renderStepProgress(syncJobProgress, job, "sync");
+  renderStepProgress(calibrationJobProgress, job, "calibration");
+  renderStepProgress(motionJobProgress, job, "pose");
+}
+
+function renderShotActivity(shot) {
+  const job = shot.latest_job;
+  if (!job) {
+    shotActivity.textContent = "No job activity yet";
+    shotActivity.className = "shot-activity";
+    return;
+  }
+
+  const running = isActiveJob(job);
+  const title = running ? `Running: ${jobTitle(job)} ${job.progress}%` : `Latest activity: ${jobTitle(job)}`;
+  shotActivity.textContent = `${title}. ${job.message}`;
+  shotActivity.className = `shot-activity ${running ? "is-running" : ""} ${job.state === "failed" ? "is-failed" : ""}`;
 }
 
 function syncedVideoCount(shot) {
@@ -396,19 +512,83 @@ function activeGroundPlaneVideo() {
   );
 }
 
-function pickGroundPlaneFrameFromPlayer() {
-  const shot = recordingsCache.find((recording) => recording.id === selectedShotId);
-  const video = activeGroundPlaneVideo();
-  if (!shot || !video) {
-    calibrationStatus.innerHTML = `<span class="error">Open a shot with a video player first.</span>`;
+function renderGroundPlanePicker(shot) {
+  const videos = (shot.browser_videos || []).filter((video) => video !== shot.side_by_side_video);
+  if (!videos.length) {
+    groundPlanePicker.innerHTML = `<div class="video-row muted">Sync videos before choosing a ground-plane frame.</div>`;
     return;
   }
 
-  const fps = estimateShotFrameRate(shot, video);
-  const frame = Math.max(0, Math.round((video.currentTime || 0) * fps));
-  groundPlaneFrame.value = String(frame);
-  useCharucoGroundplane.checked = true;
-  calibrationStatus.textContent = `Ground-plane frame set to ${frame}.`;
+  const state = loadShotUiState(shot.id);
+  const selectedVideo = videos.includes(state.groundPlaneVideo) ? state.groundPlaneVideo : videos[0];
+  const frame = state.calibration?.groundPlaneFrame ?? groundPlaneFrame.value ?? "0";
+  groundPlanePicker.innerHTML = `
+    <div class="ground-plane-picker-toolbar">
+      <label>
+        <span>Camera</span>
+        <select data-ground-plane-video>
+          ${videos.map((video, index) => `<option value="${video}" ${video === selectedVideo ? "selected" : ""}>Camera ${index + 1}</option>`).join("")}
+        </select>
+      </label>
+      <label>
+        <span>Frame</span>
+        <input type="number" min="0" step="1" value="${frame}" data-ground-plane-frame-input />
+      </label>
+    </div>
+    <video muted playsinline preload="metadata" poster="${posterUrl(shot, selectedVideo)}" src="${videoUrl(shot, selectedVideo)}" data-ground-plane-video-preview></video>
+    <input class="frame-scrubber" type="range" min="0" max="0" step="1" value="${frame}" data-ground-plane-frame-scrubber aria-label="Ground-plane frame scrubber" />
+  `;
+  setupGroundPlanePicker(shot);
+}
+
+function setupGroundPlanePicker(shot) {
+  const videoSelect = groundPlanePicker.querySelector("[data-ground-plane-video]");
+  const video = groundPlanePicker.querySelector("[data-ground-plane-video-preview]");
+  const frameInput = groundPlanePicker.querySelector("[data-ground-plane-frame-input]");
+  const scrubber = groundPlanePicker.querySelector("[data-ground-plane-frame-scrubber]");
+  if (!videoSelect || !video || !frameInput || !scrubber) return;
+
+  const updateFrameLimit = () => {
+    const fps = estimateShotFrameRate(shot, video);
+    const maxFrame = Number.isFinite(video.duration) && video.duration > 0
+      ? Math.max(0, Math.floor(video.duration * fps) - 1)
+      : 0;
+    scrubber.max = String(maxFrame);
+    frameInput.max = String(maxFrame);
+    return maxFrame;
+  };
+
+  const setFrame = async (frame) => {
+    await waitForVideoMetadata(video).catch(() => {});
+    const maxFrame = updateFrameLimit();
+    const safeFrame = Math.max(0, Math.min(maxFrame, Math.round(Number(frame) || 0)));
+    const fps = estimateShotFrameRate(shot, video);
+    frameInput.value = String(safeFrame);
+    scrubber.value = String(safeFrame);
+    groundPlaneFrame.value = String(safeFrame);
+    video.currentTime = safeFrame / fps;
+    useCharucoGroundplane.checked = true;
+    saveShotUiState(shot.id, { groundPlaneVideo: videoSelect.value });
+    persistCalibrationUiState();
+  };
+
+  video.addEventListener("loadedmetadata", () => {
+    setFrame(frameInput.value);
+  });
+  videoSelect.addEventListener("change", () => {
+    saveShotUiState(shot.id, { groundPlaneVideo: videoSelect.value });
+    renderGroundPlanePicker(shot);
+  });
+  frameInput.addEventListener("input", () => {
+    setFrame(frameInput.value);
+  });
+  scrubber.addEventListener("input", () => {
+    setFrame(scrubber.value);
+  });
+  video.addEventListener("timeupdate", () => {
+    lastGroundPlaneVideo = video;
+  });
+  setFrame(frameInput.value);
 }
 
 function updateCalibrationStages(job, shot) {
@@ -452,6 +632,7 @@ function renderCalibrationWorkbench(shot) {
   }
 
   updateCalibrationStages(job, shot);
+  renderGroundPlanePicker(shot);
   renderCalibrationPreview(shot);
 }
 
@@ -513,6 +694,7 @@ function formatTime(seconds) {
 }
 
 function renderSideBySidePlayer(shot) {
+  const manualResync = renderManualResyncPanel(shot);
   if (shot.side_by_side_video) {
     return `
       <article class="combined-player">
@@ -522,6 +704,7 @@ function renderSideBySidePlayer(shot) {
           <span>${shot.video_count} synced clips in one browser player</span>
         </div>
       </article>
+      ${manualResync}
     `;
   }
 
@@ -556,6 +739,63 @@ function renderSideBySidePlayer(shot) {
         <output data-linked-status></output>
       </div>
     </article>
+    ${manualResync}
+  `;
+}
+
+function renderManualResyncPanel(shot) {
+  const playableVideos = (shot.browser_videos || []).filter((video) => video !== shot.side_by_side_video);
+  if (playableVideos.length < 2) {
+    return "";
+  }
+  const uiState = loadShotUiState(shot.id);
+  const resyncOffsets = uiState.resyncOffsets || {};
+  const resyncBaseFrame = uiState.resyncBaseFrame || "0";
+
+  const videoMarkup = playableVideos
+    .map(
+      (video, index) => `
+        <article class="resync-camera" data-resync-camera>
+          <video muted playsinline preload="metadata" poster="${posterUrl(shot, video)}" src="${videoUrl(shot, video)}" data-resync-video data-video-name="${video}"></video>
+          <div class="resync-camera-controls">
+            <strong>Camera ${index + 1}</strong>
+            <span>${video}</span>
+            <div class="frame-stepper">
+              <button class="secondary" type="button" data-offset-step="-10">-10</button>
+              <button class="secondary" type="button" data-offset-step="-1">-1</button>
+              <input type="number" step="1" value="${resyncOffsets[video] || 0}" data-resync-offset data-video-name="${video}" aria-label="Frame offset for ${video}" />
+              <button class="secondary" type="button" data-offset-step="1">+1</button>
+              <button class="secondary" type="button" data-offset-step="10">+10</button>
+            </div>
+          </div>
+        </article>
+      `,
+    )
+    .join("");
+
+  return `
+    <section class="manual-resync" data-manual-resync>
+      <div class="section-title-row">
+        <h3>Frame resync</h3>
+        <span>Manual offsets</span>
+      </div>
+      <div class="manual-resync-controls">
+        <button class="secondary" type="button" data-resync-frame-step="-1">Previous frame</button>
+        <label>
+          <span>Preview frame</span>
+          <input type="number" min="0" step="1" value="${resyncBaseFrame}" data-resync-base-frame />
+        </label>
+        <input class="frame-scrubber" type="range" min="0" max="0" value="${resyncBaseFrame}" step="1" data-resync-frame-scrubber aria-label="Preview frame scrubber" />
+        <button class="secondary" type="button" data-resync-frame-step="1">Next frame</button>
+      </div>
+      <div class="resync-camera-grid">
+        ${videoMarkup}
+      </div>
+      <div class="actions compact-actions">
+        <button class="primary" type="button" data-apply-resync>Apply frame resync</button>
+        <output data-resync-status>Offsets are in frames. Positive trims that camera forward; negative delays it.</output>
+      </div>
+    </section>
   `;
 }
 
@@ -981,6 +1221,145 @@ function setupLinkedPlayer() {
   });
 }
 
+function setupManualResync(shot) {
+  const panel = selectedShotVideos.querySelector("[data-manual-resync]");
+  if (!panel) return;
+
+  const videos = Array.from(panel.querySelectorAll("[data-resync-video]"));
+  const baseFrameInput = panel.querySelector("[data-resync-base-frame]");
+  const frameScrubber = panel.querySelector("[data-resync-frame-scrubber]");
+  const status = panel.querySelector("[data-resync-status]");
+  const applyButton = panel.querySelector("[data-apply-resync]");
+  const fps = 30;
+
+  const setStatus = (message, isError = false) => {
+    status.textContent = message;
+    status.classList.toggle("error", isError);
+  };
+
+  const offsetInputs = () => Array.from(panel.querySelectorAll("[data-resync-offset]"));
+  const persistResyncUiState = () => {
+    const offsets = {};
+    offsetInputs().forEach((input) => {
+      offsets[input.dataset.videoName] = Number(input.value) || 0;
+    });
+    saveShotUiState(shot.id, {
+      resyncBaseFrame: baseFrameInput.value,
+      resyncOffsets: offsets,
+    });
+  };
+
+  const updateFrameLimit = () => {
+    const frameCounts = videos
+      .filter((video) => Number.isFinite(video.duration) && video.duration > 0)
+      .map((video) => Math.max(0, Math.floor(video.duration * fps) - 1));
+    const maxFrame = frameCounts.length ? Math.min(...frameCounts) : 0;
+    frameScrubber.max = String(maxFrame);
+    baseFrameInput.max = String(maxFrame);
+    if ((Number(baseFrameInput.value) || 0) > maxFrame) {
+      baseFrameInput.value = String(maxFrame);
+      frameScrubber.value = String(maxFrame);
+    }
+    return maxFrame;
+  };
+
+  const setBaseFrame = (frame) => {
+    const maxFrame = Number(frameScrubber.max) || updateFrameLimit();
+    const safeFrame = Math.max(0, Math.min(maxFrame, Math.round(Number(frame) || 0)));
+    baseFrameInput.value = String(safeFrame);
+    frameScrubber.value = String(safeFrame);
+    persistResyncUiState();
+  };
+
+  const previewOffsets = async () => {
+    await Promise.allSettled(videos.map(waitForVideoMetadata));
+    updateFrameLimit();
+    setBaseFrame(baseFrameInput.value);
+    const baseFrame = Number(baseFrameInput.value) || 0;
+    videos.forEach((video) => {
+      const input = offsetInputs().find((candidate) => candidate.dataset.videoName === video.dataset.videoName);
+      const offset = Number(input?.value) || 0;
+      const targetFrame = Math.max(0, baseFrame + offset);
+      const durationFrame = Number.isFinite(video.duration) ? Math.max(0, Math.floor(video.duration * fps) - 1) : targetFrame;
+      video.currentTime = Math.min(targetFrame, durationFrame) / fps;
+    });
+  };
+
+  panel.addEventListener("click", (event) => {
+    const offsetButton = event.target.closest("[data-offset-step]");
+    if (offsetButton) {
+      const camera = offsetButton.closest("[data-resync-camera]");
+      const input = camera?.querySelector("[data-resync-offset]");
+      if (input) {
+        input.value = String((Number(input.value) || 0) + Number(offsetButton.dataset.offsetStep));
+        persistResyncUiState();
+        previewOffsets().catch((error) => setStatus(error.message, true));
+      }
+      return;
+    }
+
+    const frameButton = event.target.closest("[data-resync-frame-step]");
+    if (frameButton) {
+      setBaseFrame((Number(baseFrameInput.value) || 0) + Number(frameButton.dataset.resyncFrameStep));
+      previewOffsets().catch((error) => setStatus(error.message, true));
+      return;
+    }
+  });
+
+  baseFrameInput.addEventListener("input", () => {
+    setBaseFrame(baseFrameInput.value);
+    previewOffsets().catch((error) => setStatus(error.message, true));
+  });
+  frameScrubber.addEventListener("input", () => {
+    setBaseFrame(frameScrubber.value);
+    previewOffsets().catch((error) => setStatus(error.message, true));
+  });
+  offsetInputs().forEach((input) => {
+    input.addEventListener("change", () => {
+      persistResyncUiState();
+      previewOffsets().catch((error) => setStatus(error.message, true));
+    });
+  });
+
+  applyButton.addEventListener("click", async () => {
+    const offsets = {};
+    offsetInputs().forEach((input) => {
+      offsets[input.dataset.videoName] = Number(input.value) || 0;
+    });
+
+    applyButton.disabled = true;
+    setStatus("Queued manual frame resync. Calibration and pose outputs will be cleared.");
+    shotActivity.textContent = "Running: Resyncing 10%. Queued manual frame resync.";
+    shotActivity.className = "shot-activity is-running";
+    activeDetailTab = "sync";
+    detailTabTouched = false;
+
+    try {
+      const { job } = await api(`/api/shots/${encodeURIComponent(shot.id)}/manual-resync-jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ offsets }),
+      });
+      activeJobId = job.id;
+      clearInterval(pollTimer);
+      pollTimer = setInterval(() => {
+        pollJob(job.id).catch((error) => {
+          clearInterval(pollTimer);
+          pollTimer = null;
+          setStatus(error.message, true);
+        });
+      }, 900);
+      await refresh();
+      await pollJob(job.id);
+    } catch (error) {
+      setStatus(error.message, true);
+      applyButton.disabled = false;
+    }
+  });
+
+  previewOffsets().catch(() => {});
+}
+
 async function ensureBrowserPreviews(shot) {
   if ((shot.browser_preview_ready && shot.side_by_side_video) || !shot.videos.length) return;
   selectedShotVideos.innerHTML = `<div class="video-row muted">Preparing browser playback preview...</div>`;
@@ -1006,8 +1385,9 @@ function selectShot(shotId) {
   activeView = "detail";
   if (selectedShotId !== shotId) {
     const shot = recordingsCache.find((recording) => recording.id === shotId);
-    activeDetailTab = shot ? relevantTabForShot(shot) : "sync";
-    detailTabTouched = false;
+    const savedTab = loadShotUiState(shotId).activeDetailTab;
+    activeDetailTab = savedTab || (shot ? relevantTabForShot(shot) : "sync");
+    detailTabTouched = Boolean(savedTab);
   }
   selectedShotId = shotId;
   createShotPanel.classList.add("is-hidden");
@@ -1057,28 +1437,23 @@ function renderSelectedShot() {
   selectedShotPurpose.textContent = purposeLabel(shot.purpose);
   selectedShotState.textContent = state.text;
   selectedShotVideoCount.textContent = `${shot.video_count} MP4 file${shot.video_count === 1 ? "" : "s"}`;
+  applyShotUiState(shot);
   selectedShotVideos.innerHTML = renderSideBySidePlayer(shot);
   bindGroundPlaneFramePicker(selectedShotVideos);
   setupLinkedPlayer();
+  setupManualResync(shot);
   ensureBrowserPreviews(shot);
   renderCalibrationWorkbench(shot);
   renderMotionWorkbench(shot);
+  renderShotActivity(shot);
+  renderStepProgressPanels(shot);
   if (!detailTabTouched || hasRunningJob(shot)) {
     activeDetailTab = relevantTabForShot(shot);
   }
   updateDetailTabs(shot);
   showDetailTab(activeDetailTab);
 
-  if (!job) {
-    activeJobId = null;
-    setDetailProgress(0, "No job", "This shot does not have a sync job yet.");
-    setDetailLog(shot.name, "No job has been started.");
-    return;
-  }
-
-  activeJobId = ["queued", "running"].includes(job.state) ? job.id : null;
-  setDetailProgress(job.progress, jobTitle(job), job.message);
-  setDetailLog(`${shot.name}: ${job.type} ${job.state}`, job.message);
+  activeJobId = ["queued", "running"].includes(job?.state) ? job.id : null;
 }
 
 function renderRecordings(recordings) {
@@ -1134,8 +1509,8 @@ async function pollJob(jobId) {
   }
   setCreateProgress(job.progress, jobTitle(job), job.message);
   setCreateLog(`${job.recording_name || "Shot"}: ${job.state}`, job.message);
-  setDetailProgress(job.progress, jobTitle(job), job.message);
-  setDetailLog(`${job.recording_name || "Shot"}: ${job.type} ${job.state}`, job.message);
+  shotActivity.textContent = `${isActiveJob(job) ? "Running" : "Latest activity"}: ${jobTitle(job)} ${isActiveJob(job) ? `${job.progress}%` : ""}. ${job.message}`;
+  shotActivity.className = `shot-activity ${isActiveJob(job) ? "is-running" : ""} ${job.state === "failed" ? "is-failed" : ""}`;
 
   if (job.state === "complete") {
     clearInterval(pollTimer);
@@ -1213,7 +1588,9 @@ detailTabButtons.forEach((button) => {
     showDetailTab(button.dataset.detailTab);
   });
 });
-pickGroundPlaneFrameButton.addEventListener("click", pickGroundPlaneFrameFromPlayer);
+calibrationForm.querySelectorAll("input, select").forEach((field) => {
+  field.addEventListener("change", persistCalibrationUiState);
+});
 
 ["dragenter", "dragover"].forEach((eventName) => {
   dropzone.addEventListener(eventName, (event) => {
@@ -1258,8 +1635,8 @@ form.addEventListener("submit", async (event) => {
     detailTabTouched = false;
     createShotPanel.classList.add("is-hidden");
     shotDetailPanel.classList.remove("is-hidden");
-    setDetailProgress(job.progress, "Queued", job.message);
-    setDetailLog(`${job.recording_name}: queued`, job.message);
+    shotActivity.textContent = `Running: Queued ${job.progress}%. ${job.message}`;
+    shotActivity.className = "shot-activity is-running";
     pollTimer = setInterval(() => {
       pollJob(job.id).catch((error) => {
         clearInterval(pollTimer);
@@ -1298,8 +1675,8 @@ calibrationForm.addEventListener("submit", async (event) => {
   detailTabTouched = false;
   calibrationButton.disabled = true;
   calibrationStatus.textContent = "Queued FreeMoCap calibration.";
-  setDetailProgress(10, "Queued", "Queued FreeMoCap calibration.");
-  setDetailLog(`${shot.name}: calibration queued`, "Waiting for FreeMoCap calibration.");
+  shotActivity.textContent = "Running: Queued 10%. Queued FreeMoCap calibration.";
+  shotActivity.className = "shot-activity is-running";
   updateCalibrationStages({ type: "calibration", progress: 10 }, shot);
 
   try {
@@ -1340,8 +1717,8 @@ motionButton.addEventListener("click", async () => {
   detailTabTouched = false;
   motionButton.disabled = true;
   motionStatus.textContent = "Queued FreeMoCap pose estimation.";
-  setDetailProgress(10, "Queued", "Queued FreeMoCap pose estimation.");
-  setDetailLog(`${shot.name}: pose estimation queued`, "Waiting for FreeMoCap pose estimation.");
+  shotActivity.textContent = "Running: Queued 10%. Queued FreeMoCap pose estimation.";
+  shotActivity.className = "shot-activity is-running";
   updateMotionStages({ type: "motion_capture", progress: 10 }, shot);
 
   try {
