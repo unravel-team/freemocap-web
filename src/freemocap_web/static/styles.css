@@ -71,7 +71,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -331,6 +332,13 @@ h2 {
   line-height: 1.45;
 }
 
+.shot-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .shot-activity {
   max-width: 70ch;
   font-size: 12px;
@@ -353,7 +361,8 @@ h2 {
 }
 
 input,
-select {
+select,
+textarea {
   height: 40px;
   border: 1px solid var(--line);
   background: oklch(0.998 0.004 220);
@@ -362,8 +371,15 @@ select {
   padding: 0 11px;
 }
 
+textarea {
+  min-height: 92px;
+  padding: 10px 11px;
+  resize: vertical;
+}
+
 input:focus,
 select:focus,
+textarea:focus,
 button:focus-visible,
 .dropzone:focus-within {
   outline: 3px solid oklch(0.78 0.1 190 / 0.45);
@@ -1224,6 +1240,32 @@ button:focus-visible,
   background: oklch(0.985 0.004 220);
 }
 
+.resync-review-callout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 10px;
+  align-items: center;
+  border: 1px solid oklch(0.78 0.09 172);
+  border-radius: 8px;
+  padding: 10px;
+  background: oklch(0.96 0.03 172);
+}
+
+.resync-review-callout strong {
+  font-size: 13px;
+}
+
+.resync-review-callout span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.resync-review-callout button {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+}
+
 .manual-resync-controls {
   display: grid;
   grid-template-columns: auto minmax(130px, 190px) minmax(180px, 1fr) auto;
@@ -1252,7 +1294,7 @@ button:focus-visible,
 
 .resync-camera-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 10px;
 }
 
@@ -1264,11 +1306,18 @@ button:focus-visible,
   background: oklch(0.978 0.006 220);
 }
 
-.resync-camera video {
+.resync-camera video,
+.resync-frame-preview {
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
   background: oklch(0.18 0.012 235);
+  object-fit: contain;
+}
+
+.resync-camera video[hidden],
+.resync-frame-preview[hidden] {
+  display: none;
 }
 
 .resync-camera-controls {
@@ -1430,6 +1479,11 @@ button:disabled {
   border-color: var(--line);
 }
 
+.danger {
+  background: var(--danger);
+  color: oklch(0.985 0.006 28);
+}
+
 output {
   min-width: 0;
   color: var(--muted);
@@ -1577,8 +1631,14 @@ output {
   .linked-video-grid,
   .linked-controls,
   .manual-resync-controls,
+  .resync-review-callout,
   .resync-camera-grid {
     grid-template-columns: 1fr;
+  }
+
+  .resync-review-callout button {
+    grid-row: auto;
+    grid-column: auto;
   }
 
   .calibration-stage,

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 
@@ -33,6 +33,14 @@ SYNC_JOBS: dict[str, dict] = {}
 SYNC_JOBS_LOCK = threading.Lock()
 DB_LOCK = threading.RLock()
 DB_INITIALIZED = False
+STATE_DB_EXISTED_AT_START: bool | None = None
+FRAME_PREVIEW_EXTRACT_SEMAPHORE = threading.BoundedSemaphore(2)
+FRAME_PREVIEW_LOCKS: dict[str, threading.Lock] = {}
+FRAME_PREVIEW_LOCKS_LOCK = threading.Lock()
+FRAME_PREVIEW_LATEST_REQUESTS: dict[tuple[str, str], int] = {}
+FRAME_PREVIEW_LATEST_REQUESTS_LOCK = threading.Lock()
+VIDEO_FPS_CACHE: dict[tuple[str, int, int], float] = {}
+VIDEO_FPS_CACHE_LOCK = threading.Lock()
 DEFAULT_PROJECT_ID = "default"
 DEFAULT_PROJECT_NAME = "Untitled project"
 
@@ -59,7 +67,9 @@ def _db() -> sqlite3.Connection:
 
 
 def _init_db() -> None:
-    global DB_INITIALIZED
+    global DB_INITIALIZED, STATE_DB_EXISTED_AT_START
+    if STATE_DB_EXISTED_AT_START is None:
+        STATE_DB_EXISTED_AT_START = _db_path().exists()
     with DB_LOCK, _db() as connection:
         connection.executescript(
             """
@@ -272,6 +282,28 @@ def _get_shot(shot_id: str) -> dict:
     return dict(row)
 
 
+def _delete_shot(shot_id: str, *, force: bool = False) -> dict:
+    if not force:
+        raise HTTPException(status_code=400, detail="Set force=true to delete a shot.")
+
+    shot = _get_shot(shot_id)
+    recording_path = Path(shot["recording_path"])
+
+    with SYNC_JOBS_LOCK:
+        for job_id, job in list(SYNC_JOBS.items()):
+            if job.get("shot_id") == shot_id:
+                SYNC_JOBS.pop(job_id, None)
+
+    with DB_LOCK, _db() as connection:
+        connection.execute("DELETE FROM jobs WHERE shot_id = ?", (shot_id,))
+        connection.execute("DELETE FROM shots WHERE id = ?", (shot_id,))
+
+    if recording_path.exists():
+        shutil.rmtree(recording_path)
+
+    return {"id": shot_id, "name": shot["name"], "recording_path": str(recording_path)}
+
+
 def _get_project() -> dict:
     _init_db()
     with DB_LOCK, _db() as connection:
@@ -285,7 +317,11 @@ def _get_project() -> dict:
             (DEFAULT_PROJECT_ID,),
         ).fetchone()
     project = dict(row)
-    project["is_created"] = project["name"] != DEFAULT_PROJECT_NAME
+    project["is_created"] = (
+        project["name"] != DEFAULT_PROJECT_NAME
+        or int(project.get("shot_count") or 0) > 0
+        or bool(STATE_DB_EXISTED_AT_START)
+    )
     return project
 
 
@@ -327,6 +363,12 @@ def _get_video_paths(video_folder: str | Path) -> list[str]:
         from freemocap.utilities.get_video_paths import get_video_paths
 
     return get_video_paths(video_folder)
+
+
+def _mp4_paths(folder: Path) -> list[Path]:
+    if not folder.exists():
+        return []
+    return sorted(path for path in folder.iterdir() if path.is_file() and path.suffix.lower() == VIDEO_SUFFIX)
 
 
 def _get_synchronization_functions() -> dict:
@@ -390,6 +432,8 @@ def _status_for_recording(recording_folder: Path) -> dict:
 
     info = RecordingInfoModel(recording_folder_path=recording_folder)
     video_paths = _get_video_paths(info.synchronized_videos_folder_path)
+    if not video_paths:
+        video_paths = [str(path) for path in _mp4_paths(Path(info.synchronized_videos_folder_path))]
     return {
         "name": info.name,
         "path": info.path,
@@ -402,11 +446,17 @@ def _status_for_recording(recording_folder: Path) -> dict:
 
 def _shot_to_recording(shot: dict) -> dict:
     recording_path = Path(shot["recording_path"])
+    synchronized_path = Path(shot["synchronized_videos_path"])
+    raw_videos_path = Path(shot["raw_videos_path"])
+    latest_job = _latest_job_for_shot(shot["id"])
+    if not _mp4_paths(synchronized_path) and _mp4_paths(raw_videos_path):
+        if latest_job and latest_job["type"] == "sync" and latest_job["state"] == "complete" and latest_job["method"] == "manual":
+            _copy_videos_with_ffmpeg(raw_videos_path, synchronized_path)
+
     try:
         recording = _status_for_recording(recording_path)
     except Exception:
-        synchronized_path = Path(shot["synchronized_videos_path"])
-        videos = sorted(path.name for path in synchronized_path.glob("*.mp4")) if synchronized_path.exists() else []
+        videos = [path.name for path in _mp4_paths(synchronized_path)]
         recording = {
             "name": shot["name"],
             "path": str(recording_path),
@@ -428,15 +478,23 @@ def _shot_to_recording(shot: dict) -> dict:
     recording["purpose"] = shot["purpose"]
     recording["created_at"] = shot["created_at"]
     recording["updated_at"] = shot["updated_at"]
-    raw_videos_path = Path(shot["raw_videos_path"])
-    recording["raw_videos"] = sorted(path.name for path in raw_videos_path.glob("*.mp4")) if raw_videos_path.exists() else []
+    synchronized_videos = _mp4_paths(synchronized_path)
+    recording["synchronized_video_frame_counts"] = {
+        path.name: _probe_video_frame_count(path) for path in synchronized_videos
+    }
+    recording["synchronized_video_fps"] = {
+        path.name: _cached_video_fps(path) for path in synchronized_videos
+    }
+    recording["raw_videos"] = [path.name for path in _mp4_paths(raw_videos_path)]
     browser_videos_path = Path(shot["synchronized_videos_path"]) / BROWSER_PREVIEW_VIDEOS_FOLDER_NAME
     recording["browser_videos"] = (
-        sorted(path.name for path in browser_videos_path.glob("*.mp4") if not path.name.endswith(".tmp.mp4"))
+        sorted(path.name for path in _mp4_paths(browser_videos_path) if not path.name.endswith(".tmp.mp4"))
         if browser_videos_path.exists()
         else []
     )
-    preview_assets = list(browser_videos_path.glob("*.mp4")) + list(browser_videos_path.glob("*.jpg")) if browser_videos_path.exists() else []
+    if not recording["browser_videos"] and recording.get("videos"):
+        recording["browser_videos"] = list(recording["videos"])
+    preview_assets = _mp4_paths(browser_videos_path) + list(browser_videos_path.glob("*.jpg")) if browser_videos_path.exists() else []
     recording["browser_preview_updated_at"] = max((path.stat().st_mtime_ns for path in preview_assets), default=None)
     preview_version_path = browser_videos_path / ".preview-version"
     recording["browser_preview_ready"] = (
@@ -448,13 +506,13 @@ def _shot_to_recording(shot: dict) -> dict:
     calibration_preview_path = Path(shot["synchronized_videos_path"]) / CALIBRATION_PREVIEW_VIDEOS_FOLDER_NAME
     calibration_preview_version_path = calibration_preview_path / ".preview-version"
     calibration_preview_assets = (
-        list(calibration_preview_path.glob("*.mp4")) + list(calibration_preview_path.glob("*.jpg"))
+        _mp4_paths(calibration_preview_path) + list(calibration_preview_path.glob("*.jpg"))
         if calibration_preview_path.exists()
         else []
     )
     calibration_side_by_side_path = calibration_preview_path / "side_by_side.mp4"
     recording["calibration_preview_videos"] = (
-        sorted(path.name for path in calibration_preview_path.glob("*.mp4")) if calibration_preview_path.exists() else []
+        [path.name for path in _mp4_paths(calibration_preview_path)] if calibration_preview_path.exists() else []
     )
     calibration_debug_frames_path = calibration_preview_path / "debug_frames"
     recording["calibration_debug_frames"] = (
@@ -479,15 +537,17 @@ def _shot_to_recording(shot: dict) -> dict:
     recording["calibration_toml_name"] = calibration_toml_path.name if calibration_toml_path else None
     recording["calibration_artifact"] = _calibration_artifact_from_toml(calibration_toml_path)
     recording["motion_capture_artifact"] = _motion_capture_artifact(recording_path)
+    latest_sync_job = _latest_job_for_shot_type(shot["id"], "sync")
+    recording["sync_method"] = latest_sync_job.get("method") if latest_sync_job else None
     annotated_videos_path = recording_path / ANNOTATED_VIDEOS_FOLDER_NAME
     annotated_assets = (
-        list(annotated_videos_path.glob("*.mp4")) + list(annotated_videos_path.glob("*.jpg"))
+        _mp4_paths(annotated_videos_path) + list(annotated_videos_path.glob("*.jpg"))
         if annotated_videos_path.exists()
         else []
     )
     pose_side_by_side_path = annotated_videos_path / "side_by_side.mp4"
     recording["pose_preview_videos"] = (
-        sorted(path.name for path in annotated_videos_path.glob("*.mp4")) if annotated_videos_path.exists() else []
+        [path.name for path in _mp4_paths(annotated_videos_path)] if annotated_videos_path.exists() else []
     )
     recording["pose_preview_posters"] = (
         sorted(path.name for path in annotated_videos_path.glob("*.jpg")) if annotated_videos_path.exists() else []
@@ -498,7 +558,6 @@ def _shot_to_recording(shot: dict) -> dict:
     recording["status"]["calibration_toml_check"] = bool(
         recording["status"].get("calibration_toml_check") or calibration_toml_path
     )
-    latest_job = _latest_job_for_shot(shot["id"])
     if (
         latest_job
         and latest_job.get("type") == "calibration"
@@ -669,7 +728,7 @@ def _pose_3d_fps(recording_folder: Path) -> float:
 
 def _calibration_preview_cache_key(shot: dict) -> int:
     preview_folder = Path(shot["synchronized_videos_path"]) / CALIBRATION_PREVIEW_VIDEOS_FOLDER_NAME
-    assets = list(preview_folder.glob("*.mp4")) + list(preview_folder.glob("*.jpg")) if preview_folder.exists() else []
+    assets = _mp4_paths(preview_folder) + list(preview_folder.glob("*.jpg")) if preview_folder.exists() else []
     return max((path.stat().st_mtime_ns for path in assets), default=0)
 
 
@@ -726,6 +785,21 @@ def _copy_timestamp_uploads(files: list[UploadFile], destination: Path) -> None:
             shutil.copyfileobj(upload.file, output)
 
 
+def _unique_destination_path(destination: Path, source_name: str) -> Path:
+    candidate = destination / Path(source_name).name
+    if not candidate.exists():
+        return candidate
+
+    stem = candidate.stem
+    suffix = candidate.suffix
+    index = 2
+    while True:
+        next_candidate = destination / f"{stem}_{index}{suffix}"
+        if not next_candidate.exists():
+            return next_candidate
+        index += 1
+
+
 def _save_video_uploads(files: list[UploadFile], destination: Path) -> list[Path]:
     destination.mkdir(parents=True, exist_ok=True)
     saved_paths: list[Path] = []
@@ -734,7 +808,7 @@ def _save_video_uploads(files: list[UploadFile], destination: Path) -> list[Path
         if not source_name.lower().endswith(VIDEO_SUFFIX):
             continue
 
-        output_path = destination / source_name
+        output_path = _unique_destination_path(destination, source_name)
         upload.file.seek(0)
         with output_path.open("wb") as output:
             shutil.copyfileobj(upload.file, output)
@@ -745,12 +819,85 @@ def _save_video_uploads(files: list[UploadFile], destination: Path) -> list[Path
     return saved_paths
 
 
-def _save_sync_video_uploads(files: list[UploadFile], destination: Path) -> list[Path]:
-    saved_paths = _save_video_uploads(files, destination)
+def _parse_local_video_paths(local_video_paths: str | None) -> list[Path]:
+    if not local_video_paths:
+        return []
+    paths = []
+    for line in local_video_paths.splitlines():
+        raw_path = line.strip().strip("\"'")
+        if raw_path:
+            paths.append(Path(raw_path).expanduser())
+    return paths
+
+
+def _copy_local_video_paths(local_video_paths: str | None, destination: Path) -> list[Path]:
+    destination.mkdir(parents=True, exist_ok=True)
+    saved_paths: list[Path] = []
+    for source_path in _parse_local_video_paths(local_video_paths):
+        if not source_path.is_file():
+            raise HTTPException(status_code=400, detail=f"Local video path does not exist: {source_path}")
+        if source_path.suffix.lower() != VIDEO_SUFFIX:
+            raise HTTPException(status_code=400, detail=f"Local video path is not an .mp4 file: {source_path}")
+
+        output_path = _unique_destination_path(destination, source_path.name)
+        shutil.copy2(source_path, output_path)
+        saved_paths.append(output_path)
+    return saved_paths
+
+
+def _save_sync_video_sources(files: list[UploadFile], local_video_paths: str | None, destination: Path) -> list[Path]:
+    saved_paths: list[Path] = []
+    try:
+        saved_paths.extend(_copy_local_video_paths(local_video_paths, destination))
+        upload_files = [file for file in files if file.filename]
+        if upload_files:
+            saved_paths.extend(_save_video_uploads(upload_files, destination))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     if len(saved_paths) < 1:
         shutil.rmtree(destination, ignore_errors=True)
-        raise HTTPException(status_code=400, detail="Select one or more .mp4 videos.")
+        raise HTTPException(status_code=400, detail="Select one or more .mp4 videos or paste local video paths.")
     return saved_paths
+
+
+def _copy_videos_with_ffmpeg(source_folder: Path, destination_folder: Path) -> list[Path]:
+    destination_folder.mkdir(parents=True, exist_ok=True)
+    output_paths: list[Path] = []
+    source_videos = _mp4_paths(source_folder)
+    if not source_videos:
+        raise HTTPException(status_code=400, detail="No .mp4 videos were found for manual synchronization.")
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    for source_video in source_videos:
+        output_path = destination_folder / source_video.name
+        if ffmpeg_path is None:
+            shutil.copy2(source_video, output_path)
+            output_paths.append(output_path)
+            continue
+
+        command = [
+            ffmpeg_path,
+            "-y",
+            "-i",
+            str(source_video),
+            "-map",
+            "0:v:0",
+            "-c:v",
+            "copy",
+            "-an",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            raise HTTPException(status_code=500, detail=f"Manual sync copy failed: {exc.stderr[-1200:]}") from exc
+        output_paths.append(output_path)
+    return output_paths
 
 
 def _sync_videos(raw_folder: Path, synchronized_folder: Path, method: str, brightness_threshold: float) -> Path:
@@ -780,10 +927,10 @@ def _sync_videos(raw_folder: Path, synchronized_folder: Path, method: str, brigh
         )
         return Path(output_path)
 
-    raise HTTPException(status_code=400, detail="Synchronization method must be 'audio' or 'brightness'.")
+    raise HTTPException(status_code=400, detail="Synchronization method must be 'audio', 'brightness', or 'manual'.")
 
 
-def _create_browser_preview_videos(synchronized_folder: Path, force: bool = False) -> list[Path]:
+def _create_browser_preview_videos(synchronized_folder: Path, force: bool = False, preset: str = "veryfast") -> list[Path]:
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path is None:
         raise HTTPException(status_code=400, detail="FFmpeg is required for browser previews and was not found.")
@@ -797,9 +944,7 @@ def _create_browser_preview_videos(synchronized_folder: Path, force: bool = Fals
         force = True
 
     preview_paths: list[Path] = []
-    source_videos = sorted(
-        path for path in synchronized_folder.glob("*.mp4") if path.parent.name != BROWSER_PREVIEW_VIDEOS_FOLDER_NAME
-    )
+    source_videos = _mp4_paths(synchronized_folder)
 
     for source_video in source_videos:
         output_path = preview_folder / source_video.name
@@ -820,7 +965,7 @@ def _create_browser_preview_videos(synchronized_folder: Path, force: bool = Fals
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            preset,
             "-crf",
             "23",
             "-profile:v",
@@ -852,7 +997,7 @@ def _create_browser_preview_videos(synchronized_folder: Path, force: bool = Fals
         preview_paths.append(output_path)
 
     if len(preview_paths) >= 2:
-        _create_side_by_side_preview(preview_paths, preview_folder, force=force)
+        _create_side_by_side_preview(preview_paths, preview_folder, force=force, preset=preset)
 
     preview_version_path.write_text(BROWSER_PREVIEW_ENCODER_VERSION)
 
@@ -864,6 +1009,7 @@ def _create_side_by_side_preview(
     preview_folder: Path,
     force: bool = False,
     *,
+    preset: str = "veryfast",
     tile_width: int = 640,
     crf: int = 23,
     profile: str = "baseline",
@@ -910,7 +1056,7 @@ def _create_side_by_side_preview(
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            preset,
             "-crf",
             str(crf),
             "-profile:v",
@@ -976,7 +1122,7 @@ def _clear_downstream_artifacts(recording_folder: Path) -> None:
         shutil.rmtree(recording_folder / folder_name, ignore_errors=True)
 
     synchronized_folder = recording_folder / SYNCHRONIZED_VIDEOS_FOLDER_NAME
-    for folder_name in [BROWSER_PREVIEW_VIDEOS_FOLDER_NAME, CALIBRATION_PREVIEW_VIDEOS_FOLDER_NAME]:
+    for folder_name in [BROWSER_PREVIEW_VIDEOS_FOLDER_NAME, CALIBRATION_PREVIEW_VIDEOS_FOLDER_NAME, "frame_preview_images"]:
         shutil.rmtree(synchronized_folder / folder_name, ignore_errors=True)
 
     for toml_path in recording_folder.glob("*.toml"):
@@ -1017,14 +1163,224 @@ def _probe_video_frame_count(video_path: Path) -> int:
     return max(0, round(duration * fps))
 
 
-def _manual_resync_videos(synchronized_folder: Path, frame_offsets: dict[str, int], fps: float = 30.0) -> None:
+def _probe_video_fps(video_path: Path) -> float:
+    ffprobe_path = shutil.which("ffprobe")
+    if ffprobe_path is None:
+        return 30.0
+
+    command = [
+        ffprobe_path,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=avg_frame_rate,r_frame_rate",
+        "-of",
+        "default=noprint_wrappers=1",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError:
+        return 30.0
+
+    values = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key] = value
+    rate = values.get("avg_frame_rate") or values.get("r_frame_rate") or "30/1"
+    numerator, _, denominator = rate.partition("/")
+    try:
+        return max(1.0, float(numerator or 30) / float(denominator or 1))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 30.0
+
+
+def _cached_video_fps(video_path: Path) -> float:
+    stat = video_path.stat()
+    cache_key = (str(video_path), stat.st_mtime_ns, stat.st_size)
+    with VIDEO_FPS_CACHE_LOCK:
+        cached_fps = VIDEO_FPS_CACHE.get(cache_key)
+    if cached_fps is not None:
+        return cached_fps
+
+    with FRAME_PREVIEW_EXTRACT_SEMAPHORE:
+        fps = _probe_video_fps(video_path)
+    with VIDEO_FPS_CACHE_LOCK:
+        if len(VIDEO_FPS_CACHE) > 128:
+            VIDEO_FPS_CACHE.clear()
+        VIDEO_FPS_CACHE[cache_key] = fps
+    return fps
+
+
+def _synchronized_video_path(shot: dict, filename: str) -> Path:
+    if Path(filename).name != filename or not filename.lower().endswith(VIDEO_SUFFIX):
+        raise HTTPException(status_code=400, detail="Invalid video filename.")
+
+    synchronized_folder = Path(shot["synchronized_videos_path"]).resolve()
+    video_path = (synchronized_folder / filename).resolve()
+    if synchronized_folder not in video_path.parents or not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video not found.")
+    return video_path
+
+
+def _frame_preview_lock(output_path: Path) -> threading.Lock:
+    key = str(output_path)
+    with FRAME_PREVIEW_LOCKS_LOCK:
+        lock = FRAME_PREVIEW_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            FRAME_PREVIEW_LOCKS[key] = lock
+        return lock
+
+
+def _set_latest_frame_preview_request(shot_id: str, filename: str, request_id: int) -> tuple[str, str]:
+    key = (shot_id, filename)
+    with FRAME_PREVIEW_LATEST_REQUESTS_LOCK:
+        FRAME_PREVIEW_LATEST_REQUESTS[key] = max(request_id, FRAME_PREVIEW_LATEST_REQUESTS.get(key, 0))
+    return key
+
+
+def _is_stale_frame_preview_request(key: tuple[str, str], request_id: int) -> bool:
+    if request_id <= 0:
+        return False
+    with FRAME_PREVIEW_LATEST_REQUESTS_LOCK:
+        return request_id < FRAME_PREVIEW_LATEST_REQUESTS.get(key, 0)
+
+
+def _extract_video_frame(video_path: Path, output_path: Path, frame: int, fps: float = 30.0) -> Path:
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        raise HTTPException(status_code=400, detail="FFmpeg is required for frame previews and was not found.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_frame = max(0, int(frame or 0))
+    timestamp = safe_frame / max(1.0, float(fps or 30.0))
+    temporary_output = output_path.with_name(f"{output_path.stem}.{uuid.uuid4().hex}.tmp.jpg")
+    command = [
+        ffmpeg_path,
+        "-y",
+        "-ss",
+        f"{timestamp:.6f}",
+        "-i",
+        str(video_path),
+        "-frames:v",
+        "1",
+        "-q:v",
+        "3",
+        str(temporary_output),
+    ]
+    try:
+        with FRAME_PREVIEW_EXTRACT_SEMAPHORE:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        temporary_output.replace(output_path)
+    except subprocess.CalledProcessError as exc:
+        temporary_output.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Frame extraction failed: {exc.stderr[-1200:]}") from exc
+    return output_path
+
+
+def _run_ffmpeg_with_frame_progress(
+    command: list[str],
+    *,
+    target_frames: int,
+    on_progress,
+) -> None:
+    progress_command = [command[0], "-nostats", "-progress", "pipe:1", *command[1:]]
+    process = subprocess.Popen(
+        progress_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    output_lines: list[str] = []
+    last_progress = -1
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            clean_line = line.strip()
+            if clean_line:
+                output_lines.append(clean_line)
+            if clean_line.startswith("frame="):
+                try:
+                    current_frame = int(clean_line.partition("=")[2])
+                except ValueError:
+                    continue
+                progress = min(1.0, max(0.0, current_frame / max(1, target_frames)))
+                progress_bucket = int(progress * 100)
+                if progress_bucket >= last_progress + 2:
+                    last_progress = progress_bucket
+                    on_progress(progress)
+        return_code = process.wait()
+    except Exception:
+        process.kill()
+        process.wait()
+        raise
+
+    if return_code != 0:
+        detail = "\n".join(output_lines[-40:])
+        raise subprocess.CalledProcessError(return_code, progress_command, output=detail, stderr=detail)
+
+
+def _create_calibration_range_videos(
+    synchronized_folder: Path,
+    recording_folder: Path,
+    start_seconds: float,
+    end_seconds: float,
+) -> Path | None:
+    start_seconds = max(0.0, float(start_seconds or 0))
+    end_seconds = max(0.0, float(end_seconds or 0))
+    if end_seconds <= 0 or end_seconds <= start_seconds:
+        return None
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        raise HTTPException(status_code=400, detail="FFmpeg is required for calibration range trimming and was not found.")
+
+    source_videos = _mp4_paths(synchronized_folder)
+    if len(source_videos) < 2:
+        raise HTTPException(status_code=400, detail="Calibration requires at least two synchronized videos.")
+
+    duration_seconds = end_seconds - start_seconds
+    range_folder = recording_folder / f"calibration_range_videos_{uuid.uuid4().hex}"
+    range_folder.mkdir(parents=True, exist_ok=False)
+    try:
+        for source_video in source_videos:
+            output_path = range_folder / source_video.name
+            command = [
+                ffmpeg_path,
+                "-y",
+                "-ss",
+                f"{start_seconds:.6f}",
+                "-i",
+                str(source_video),
+                "-t",
+                f"{duration_seconds:.6f}",
+                "-map",
+                "0:v:0",
+                "-c:v",
+                "copy",
+                "-an",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        return range_folder
+    except subprocess.CalledProcessError as exc:
+        shutil.rmtree(range_folder, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"Calibration range trim failed: {exc.stderr[-1200:]}") from exc
+
+
+def _manual_resync_videos(source_folder: Path, synchronized_folder: Path, frame_offsets: dict[str, int], progress_callback=None) -> None:
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path is None:
         raise HTTPException(status_code=400, detail="FFmpeg is required for manual resync and was not found.")
 
-    source_videos = sorted(
-        path for path in synchronized_folder.glob("*.mp4") if path.parent.name != BROWSER_PREVIEW_VIDEOS_FOLDER_NAME
-    )
+    source_videos = _mp4_paths(source_folder)
     if not source_videos:
         raise HTTPException(status_code=400, detail="No synchronized videos found to resync.")
 
@@ -1034,26 +1390,23 @@ def _manual_resync_videos(synchronized_folder: Path, frame_offsets: dict[str, in
 
     temp_folder = synchronized_folder.with_name(f"{synchronized_folder.name}_manual_resync_{uuid.uuid4().hex}")
     temp_folder.mkdir(parents=True, exist_ok=False)
-    safe_fps = max(1.0, float(fps or 30.0))
-    target_frame_count = min(_probe_video_frame_count(path) for path in source_videos)
+    source_frame_counts = {path.name: _probe_video_frame_count(path) for path in source_videos}
+    raw_offsets = {path.name: int(frame_offsets.get(path.name, 0)) for path in source_videos}
+    minimum_offset = min(raw_offsets.values(), default=0)
+    normalized_offsets = {name: offset - minimum_offset for name, offset in raw_offsets.items()}
+    target_frame_count = min(
+        max(0, source_frame_counts[path.name] - normalized_offsets[path.name])
+        for path in source_videos
+    )
+    if target_frame_count <= 0:
+        raise HTTPException(status_code=400, detail="Manual resync offsets leave no overlapping video frames.")
     try:
-        for source_video in source_videos:
-            offset_frames = int(frame_offsets.get(source_video.name, 0))
+        for index, source_video in enumerate(source_videos):
+            offset_frames = normalized_offsets[source_video.name]
             output_path = temp_folder / source_video.name
-            offset_seconds = abs(offset_frames) / safe_fps
-            if offset_frames > 0:
-                video_filter = (
-                    f"trim=start_frame={offset_frames},setpts=PTS-STARTPTS,"
-                    f"tpad=stop_duration={offset_seconds:.6f}:stop_mode=clone,"
-                    f"trim=end_frame={target_frame_count},setpts=PTS-STARTPTS"
-                )
-            elif offset_frames < 0:
-                video_filter = (
-                    f"tpad=start_duration={offset_seconds:.6f}:start_mode=clone,"
-                    f"trim=end_frame={target_frame_count},setpts=PTS-STARTPTS"
-                )
-            else:
-                video_filter = f"trim=end_frame={target_frame_count},setpts=PTS-STARTPTS"
+            source_fps = _cached_video_fps(source_video)
+            end_frame = offset_frames + target_frame_count
+            video_filter = f"trim=start_frame={offset_frames}:end_frame={end_frame},setpts=PTS-STARTPTS"
             command = [
                 ffmpeg_path,
                 "-y",
@@ -1061,35 +1414,50 @@ def _manual_resync_videos(synchronized_folder: Path, frame_offsets: dict[str, in
                 str(source_video),
                 "-vf",
                 video_filter,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                "-r",
+                f"{source_fps:g}",
+                "-frames:v",
+                str(target_frame_count),
+                "-movflags",
+                "+faststart",
+                "-an",
+                str(output_path),
             ]
-            command.extend(
-                [
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-crf",
-                    "18",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-r",
-                    f"{safe_fps:g}",
-                    "-g",
-                    f"{int(safe_fps):g}",
-                    "-frames:v",
-                    str(target_frame_count),
-                    "-movflags",
-                    "+faststart",
-                    "-an",
-                    str(output_path),
-                ]
-            )
-            subprocess.run(command, check=True, capture_output=True, text=True)
+            video_start_progress = 20 + round((index / len(source_videos)) * 40)
+            video_end_progress = 20 + round(((index + 1) / len(source_videos)) * 40)
+            if progress_callback:
+                progress_callback(video_start_progress, f"Encoding camera {index + 1} of {len(source_videos)}: {source_video.name}.")
 
-        for existing_video in source_videos:
-            existing_video.unlink(missing_ok=True)
-        for resynced_video in sorted(temp_folder.glob("*.mp4")):
+            def update_video_progress(progress: float) -> None:
+                if not progress_callback:
+                    return
+                job_progress = video_start_progress + round((video_end_progress - video_start_progress) * progress)
+                progress_callback(
+                    job_progress,
+                    f"Encoding camera {index + 1} of {len(source_videos)}: {source_video.name} ({round(progress * 100)}%).",
+                )
+
+            _run_ffmpeg_with_frame_progress(
+                command,
+                target_frames=target_frame_count,
+                on_progress=update_video_progress,
+            )
+
+        resynced_videos = _mp4_paths(temp_folder)
+        resynced_names = {path.name for path in resynced_videos}
+        for resynced_video in resynced_videos:
             resynced_video.replace(synchronized_folder / resynced_video.name)
+        for existing_video in _mp4_paths(synchronized_folder):
+            if existing_video.name not in resynced_names:
+                existing_video.unlink(missing_ok=True)
     except subprocess.CalledProcessError as exc:
         raise HTTPException(status_code=500, detail=f"Manual resync failed: {exc.stderr[-1200:]}") from exc
     finally:
@@ -1395,11 +1763,7 @@ def _create_calibration_overlay_preview(
     elif not preview_version_path.exists():
         force = True
 
-    source_videos = sorted(
-        path
-        for path in synchronized_folder.glob("*.mp4")
-        if path.name != "side_by_side.mp4"
-    )
+    source_videos = [path for path in _mp4_paths(synchronized_folder) if path.name != "side_by_side.mp4"]
     if len(source_videos) < 2:
         raise HTTPException(status_code=400, detail="Calibration preview requires at least two synchronized videos.")
 
@@ -1496,7 +1860,7 @@ def _create_calibration_overlay_preview(
 def _monitor_sync_outputs(job_id: str, synchronized_folder: Path, expected_video_count: int, stop_event: threading.Event) -> None:
     last_progress = 40
     while not stop_event.wait(2):
-        synced_videos = sorted(synchronized_folder.glob("*.mp4"))
+        synced_videos = _mp4_paths(synchronized_folder)
         if expected_video_count > 0:
             completed_ratio = min(1.0, len(synced_videos) / expected_video_count)
             progress = max(last_progress, min(82, 45 + round(completed_ratio * 35)))
@@ -1519,8 +1883,15 @@ def _monitor_sync_outputs(job_id: str, synchronized_folder: Path, expected_video
 
 def _run_sync_job(job_id: str, raw_folder: Path, synchronized_folder: Path, method: str, brightness_threshold: float) -> None:
     try:
-        raw_videos = sorted(raw_folder.glob("*.mp4"))
-        if len(raw_videos) == 1:
+        raw_videos = _mp4_paths(raw_folder)
+        if not raw_videos:
+            raise HTTPException(status_code=400, detail="No .mp4 videos were found for synchronization.")
+        preview_preset = "veryfast"
+        if method == "manual":
+            _set_job(job_id, state="running", progress=35, message="Preparing manual frame alignment with FFmpeg.")
+            _copy_videos_with_ffmpeg(raw_folder, synchronized_folder)
+            preview_preset = "ultrafast"
+        elif len(raw_videos) == 1:
             _set_job(job_id, state="running", progress=35, message="Preparing single-video shot.")
             synchronized_folder.mkdir(parents=True, exist_ok=True)
             shutil.copy(raw_videos[0], synchronized_folder / raw_videos[0].name)
@@ -1541,9 +1912,13 @@ def _run_sync_job(job_id: str, raw_folder: Path, synchronized_folder: Path, meth
                 monitor.join(timeout=1)
         _set_job(job_id, progress=85, message="Reading FreeMoCap recording status.")
         recording = _status_for_recording(synchronized_folder.parent)
-        _set_job(job_id, progress=90, message="Creating browser preview clips.")
-        _create_browser_preview_videos(synchronized_folder)
-        _set_job(job_id, state="complete", progress=100, message="Synchronized videos are ready.", recording=recording)
+        if method == "manual":
+            complete_message = "Manual alignment clips are ready."
+        else:
+            _set_job(job_id, progress=90, message="Creating browser preview clips.")
+            _create_browser_preview_videos(synchronized_folder, preset=preview_preset)
+            complete_message = "Synchronized videos are ready."
+        _set_job(job_id, state="complete", progress=100, message=complete_message, recording=recording)
     except Exception as exc:
         _set_job(job_id, state="failed", progress=100, message=str(exc))
 
@@ -1552,14 +1927,20 @@ def _run_manual_resync_job(job_id: str, shot_id: str, frame_offsets: dict[str, i
     try:
         shot = _get_shot(shot_id)
         recording_folder = Path(shot["recording_path"])
+        raw_folder = Path(shot["raw_videos_path"])
         synchronized_folder = Path(shot["synchronized_videos_path"])
-        _set_job(job_id, state="running", progress=20, message="Applying frame offsets to synchronized videos.")
+        source_folder = raw_folder if _mp4_paths(raw_folder) else synchronized_folder
+        _set_job(job_id, state="running", progress=20, message="Applying exact frame offsets to synchronized videos.")
         _invalidate_downstream_jobs(shot_id)
-        _manual_resync_videos(synchronized_folder, frame_offsets)
+        _manual_resync_videos(
+            source_folder,
+            synchronized_folder,
+            frame_offsets,
+            progress_callback=lambda progress, message: _set_job(job_id, progress=progress, message=message),
+        )
         _set_job(job_id, progress=65, message="Clearing calibration and pose outputs from the previous sync.")
         _clear_downstream_artifacts(recording_folder)
-        _set_job(job_id, progress=82, message="Rebuilding browser playback previews.")
-        _create_browser_preview_videos(synchronized_folder, force=True)
+        _set_job(job_id, progress=82, message="Refreshing manual alignment clips.")
         recording = _shot_to_recording(_get_shot(shot_id))
         _set_job(job_id, state="complete", progress=100, message="Manual frame resync complete.", recording=recording)
     except Exception as exc:
@@ -1613,7 +1994,7 @@ def _monitor_motion_capture_outputs(job_id: str, recording_folder: Path, stop_ev
                 message = stage_message
         annotated_folder = recording_folder / ANNOTATED_VIDEOS_FOLDER_NAME
         annotated_videos = (
-            sorted(path for path in annotated_folder.glob("*.mp4") if path.name != "side_by_side.mp4")
+            [path for path in _mp4_paths(annotated_folder) if path.name != "side_by_side.mp4"]
             if annotated_folder.exists()
             else []
         )
@@ -1654,7 +2035,7 @@ def _run_motion_capture_job(job_id: str, shot_id: str, recording_folder: Path, m
             use_tqdm=False,
         )
         annotated_folder = recording_folder / ANNOTATED_VIDEOS_FOLDER_NAME
-        annotated_videos = sorted(path for path in annotated_folder.glob("*.mp4") if path.name != "side_by_side.mp4")
+        annotated_videos = [path for path in _mp4_paths(annotated_folder) if path.name != "side_by_side.mp4"]
         if annotated_videos:
             _set_job(job_id, progress=94, message="Creating pose preview.")
             for annotated_video in annotated_videos:
@@ -1689,6 +2070,8 @@ def _run_calibration_job(
     charuco_square_size_mm: float,
     use_charuco_as_groundplane: bool,
     ground_plane_frame: int,
+    calibration_start_time: float,
+    calibration_end_time: float,
 ) -> None:
     progress_state = {"progress": 25}
     stop_monitor = threading.Event()
@@ -1699,7 +2082,7 @@ def _run_calibration_job(
         _set_job(job_id, progress=progress, message=clean_message)
 
     try:
-        synced_videos = sorted(synchronized_folder.glob("*.mp4"))
+        synced_videos = _mp4_paths(synchronized_folder)
         if len(synced_videos) < 2:
             raise HTTPException(status_code=400, detail="Calibration requires at least two synchronized videos.")
 
@@ -1712,6 +2095,25 @@ def _run_calibration_job(
             raise HTTPException(status_code=400, detail=f"Unknown ChArUco board: {charuco_board_name}.")
         if charuco_square_size_mm <= 0:
             raise HTTPException(status_code=400, detail="ChArUco square size must be greater than zero.")
+
+        recording_folder = synchronized_folder.parent
+        calibration_videos_folder = synchronized_folder
+        range_folder = _create_calibration_range_videos(
+            synchronized_folder,
+            recording_folder,
+            calibration_start_time,
+            calibration_end_time,
+        )
+        if range_folder is not None:
+            calibration_videos_folder = range_folder
+            range_start_frame = round(max(0.0, calibration_start_time) * _cached_video_fps(synced_videos[0]))
+            ground_plane_frame = max(0, ground_plane_frame - range_start_frame)
+            _set_job(
+                job_id,
+                state="running",
+                progress=22,
+                message=f"Using calibration range {calibration_start_time:g}s to {calibration_end_time:g}s.",
+            )
 
         _set_job(job_id, state="running", progress=25, message="Loading FreeMoCap Anipose calibration.")
         monitor = threading.Thread(
@@ -1740,7 +2142,7 @@ def _run_calibration_job(
                     toml_path, groundplane_success = calibration["run_anipose_capture_volume_calibration"](
                         charuco_board_definition=charuco_boards[charuco_board_name](),
                         charuco_square_size=float(charuco_square_size_mm),
-                        calibration_videos_folder_path=synchronized_folder,
+                        calibration_videos_folder_path=calibration_videos_folder,
                         pin_camera_0_to_origin=True,
                         use_charuco_as_groundplane=use_charuco_as_groundplane,
                         progress_callback=progress_callback,
@@ -1751,7 +2153,7 @@ def _run_calibration_job(
                 toml_path, groundplane_success = calibration["run_anipose_capture_volume_calibration"](
                     charuco_board_definition=charuco_boards[charuco_board_name](),
                     charuco_square_size=float(charuco_square_size_mm),
-                    calibration_videos_folder_path=synchronized_folder,
+                    calibration_videos_folder_path=calibration_videos_folder,
                     pin_camera_0_to_origin=True,
                     use_charuco_as_groundplane=use_charuco_as_groundplane,
                     progress_callback=progress_callback,
@@ -1770,6 +2172,9 @@ def _run_calibration_job(
         stop_monitor.set()
         detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
         _set_job(job_id, state="failed", progress=100, message=detail, error=detail)
+    finally:
+        if "range_folder" in locals() and range_folder is not None:
+            shutil.rmtree(range_folder, ignore_errors=True)
 
 
 @app.get("/")
@@ -1839,6 +2244,7 @@ def import_videos(
     synchronize: Annotated[bool, Form()] = False,
     synchronization_method: Annotated[str, Form()] = "audio",
     brightness_threshold: Annotated[float, Form()] = 1000.0,
+    local_video_paths: Annotated[str, Form()] = "",
     files: Annotated[list[UploadFile], File()] = [],
 ) -> dict:
     recording_folder = _recording_folder(recording_name)
@@ -1852,13 +2258,16 @@ def import_videos(
     if synchronize:
         raw_tmp = Path(tempfile.mkdtemp(prefix="freemocap-web-upload-"))
         try:
-            _save_video_uploads(files, raw_tmp)
+            _save_sync_video_sources(files, local_video_paths, raw_tmp)
             _copy_timestamp_uploads(files, synchronized_folder)
-            _sync_videos(raw_tmp, synchronized_folder, synchronization_method, brightness_threshold)
+            if synchronization_method == "manual":
+                _copy_videos_with_ffmpeg(raw_tmp, synchronized_folder)
+            else:
+                _sync_videos(raw_tmp, synchronized_folder, synchronization_method, brightness_threshold)
         finally:
             shutil.rmtree(raw_tmp, ignore_errors=True)
     else:
-        _save_video_uploads(files, synchronized_folder)
+        _save_sync_video_sources(files, local_video_paths, synchronized_folder)
         _copy_timestamp_uploads(files, synchronized_folder)
 
     return {"recording": _status_for_recording(recording_folder)}
@@ -1870,6 +2279,7 @@ def create_sync_job(
     purpose: Annotated[str, Form()] = "unassigned",
     synchronization_method: Annotated[str, Form()] = "audio",
     brightness_threshold: Annotated[float, Form()] = 1000.0,
+    local_video_paths: Annotated[str, Form()] = "",
     files: Annotated[list[UploadFile], File()] = [],
 ) -> dict:
     if purpose not in {"calibration", "motion_capture", "unassigned"}:
@@ -1888,7 +2298,7 @@ def create_sync_job(
     if raw_folder.exists():
         shutil.rmtree(raw_folder)
     raw_folder.mkdir(parents=True, exist_ok=True)
-    saved_paths = _save_sync_video_uploads(files, raw_folder)
+    saved_paths = _save_sync_video_sources(files, local_video_paths, raw_folder)
 
     job_id = uuid.uuid4().hex
     shot_id = uuid.uuid4().hex
@@ -1905,14 +2315,14 @@ def create_sync_job(
         shot["id"],
         job_type="sync",
         method=synchronization_method,
-        message=f"Uploaded {len(saved_paths)} videos.",
+        message=f"Loaded {len(saved_paths)} videos.",
     )
     with SYNC_JOBS_LOCK:
         SYNC_JOBS[job_id] = {
             "id": job_id,
             "state": "queued",
             "progress": 15,
-            "message": f"Uploaded {len(saved_paths)} videos.",
+            "message": f"Loaded {len(saved_paths)} videos.",
             "shot_id": shot["id"],
             "recording_name": recording_folder.name,
             "recording_path": str(recording_folder),
@@ -1939,11 +2349,16 @@ def get_job(job_id: str) -> dict:
     return {"job": _get_job(job_id)}
 
 
+@app.delete("/api/shots/{shot_id}")
+def delete_shot(shot_id: str, force: bool = False) -> dict:
+    return {"deleted": _delete_shot(shot_id, force=force)}
+
+
 @app.post("/api/shots/{shot_id}/manual-resync-jobs")
 def create_manual_resync_job(shot_id: str, payload: Annotated[dict, Body()]) -> dict:
     shot = _get_shot(shot_id)
     synchronized_folder = Path(shot["synchronized_videos_path"])
-    synced_videos = sorted(synchronized_folder.glob("*.mp4")) if synchronized_folder.exists() else []
+    synced_videos = _mp4_paths(synchronized_folder)
     if not synced_videos:
         raise HTTPException(status_code=400, detail="Run synchronization before manual frame resync.")
 
@@ -1999,10 +2414,12 @@ def create_calibration_job(
     charuco_square_size_mm: Annotated[float, Form()] = 39.0,
     use_charuco_as_groundplane: Annotated[bool, Form()] = False,
     ground_plane_frame: Annotated[int, Form()] = 0,
+    calibration_start_time: Annotated[float, Form()] = 0.0,
+    calibration_end_time: Annotated[float, Form()] = 0.0,
 ) -> dict:
     shot = _get_shot(shot_id)
     synchronized_folder = Path(shot["synchronized_videos_path"])
-    synced_videos = sorted(synchronized_folder.glob("*.mp4")) if synchronized_folder.exists() else []
+    synced_videos = _mp4_paths(synchronized_folder)
     if len(synced_videos) < 2:
         raise HTTPException(status_code=400, detail="Run synchronization on at least two videos before calibration.")
 
@@ -2011,7 +2428,13 @@ def create_calibration_job(
         raise HTTPException(status_code=409, detail="Wait for the current job to finish before starting calibration.")
 
     job_id = uuid.uuid4().hex
-    method = f"{charuco_board_name}, {charuco_square_size_mm:g} mm, ground frame {max(0, ground_plane_frame)}"
+    safe_start_time = max(0.0, float(calibration_start_time or 0))
+    safe_end_time = max(0.0, float(calibration_end_time or 0))
+    if safe_end_time > 0 and safe_end_time <= safe_start_time:
+        raise HTTPException(status_code=400, detail="Calibration end time must be greater than start time.")
+
+    range_text = f", range {safe_start_time:g}s-{safe_end_time:g}s" if safe_end_time > safe_start_time else ""
+    method = f"{charuco_board_name}, {charuco_square_size_mm:g} mm, ground frame {max(0, ground_plane_frame)}{range_text}"
     _insert_job(
         job_id,
         shot_id,
@@ -2044,6 +2467,8 @@ def create_calibration_job(
             charuco_square_size_mm,
             use_charuco_as_groundplane,
             max(0, ground_plane_frame),
+            safe_start_time,
+            safe_end_time,
         ),
         daemon=True,
     )
@@ -2059,7 +2484,7 @@ def create_motion_capture_job(
     shot = _get_shot(shot_id)
     recording_folder = Path(shot["recording_path"])
     synchronized_folder = Path(shot["synchronized_videos_path"])
-    synced_videos = sorted(synchronized_folder.glob("*.mp4")) if synchronized_folder.exists() else []
+    synced_videos = _mp4_paths(synchronized_folder)
     if not synced_videos:
         raise HTTPException(status_code=400, detail="Run synchronization before pose estimation.")
     if len(synced_videos) > 1 and _get_calibration_toml_path(recording_folder) is None:
@@ -2113,6 +2538,37 @@ def create_browser_previews(shot_id: str, force: bool = False) -> dict:
     return {"browser_videos": [path.name for path in preview_paths]}
 
 
+@app.get("/api/shots/{shot_id}/frame-previews/{filename}")
+def get_synchronized_frame_preview(
+    shot_id: str,
+    filename: str,
+    frame: int = 0,
+    offset: int = 0,
+    request_id: int = 0,
+):
+    shot = _get_shot(shot_id)
+    video_path = _synchronized_video_path(shot, filename)
+    target_frame = max(0, int(frame or 0) + int(offset or 0))
+    preview_folder = Path(shot["synchronized_videos_path"]) / "frame_preview_images"
+    output_path = preview_folder / f"{video_path.stem}_frame_{target_frame}.jpg"
+    request_key = _set_latest_frame_preview_request(shot_id, filename, int(request_id or 0))
+    with _frame_preview_lock(output_path):
+        if _is_stale_frame_preview_request(request_key, int(request_id or 0)):
+            return Response(status_code=204, headers={"Cache-Control": "no-store"})
+        if not output_path.exists() or output_path.stat().st_mtime < video_path.stat().st_mtime:
+            _extract_video_frame(video_path, output_path, target_frame, fps=_cached_video_fps(video_path))
+        if _is_stale_frame_preview_request(request_key, int(request_id or 0)):
+            return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+    return FileResponse(
+        output_path,
+        media_type="image/jpeg",
+        filename=output_path.name,
+        content_disposition_type="inline",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.post("/api/shots/{shot_id}/pose-preview")
 def create_pose_preview(shot_id: str, force: bool = False) -> dict:
     shot = _get_shot(shot_id)
@@ -2120,7 +2576,7 @@ def create_pose_preview(shot_id: str, force: bool = False) -> dict:
     if not annotated_folder.exists():
         raise HTTPException(status_code=400, detail="Run pose estimation before building pose preview.")
 
-    annotated_videos = sorted(path for path in annotated_folder.glob("*.mp4") if path.name != "side_by_side.mp4")
+    annotated_videos = [path for path in _mp4_paths(annotated_folder) if path.name != "side_by_side.mp4"]
     if not annotated_videos:
         raise HTTPException(status_code=400, detail="No FreeMoCap annotated videos found.")
 
@@ -2170,7 +2626,7 @@ def get_synchronized_video(shot_id: str, filename: str) -> FileResponse:
     preview_folder = (synchronized_folder / BROWSER_PREVIEW_VIDEOS_FOLDER_NAME).resolve()
     video_path = (preview_folder / filename).resolve()
     if preview_folder not in video_path.parents or not video_path.exists():
-        raise HTTPException(status_code=404, detail="Video not found.")
+        video_path = _synchronized_video_path(shot, filename)
 
     return FileResponse(
         video_path,

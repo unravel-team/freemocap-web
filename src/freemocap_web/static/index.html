@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FreeMoCap Web</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260512-inline-pose-clips" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260514-calibration-range" />
   </head>
   <body>
     <section class="onboarding-screen" id="projectOnboarding">
@@ -61,7 +61,12 @@
             <label class="dropzone" for="fileInput" id="dropzone">
               <input id="fileInput" name="files" type="file" accept=".mp4,video/mp4" multiple />
               <span class="drop-title" id="selectedVideoSummary">Select videos</span>
-              <span class="drop-copy">Choose one or more MP4 files from the same take.</span>
+              <span class="drop-copy">Choose one or more MP4 files from the same take. Reopen this picker to add more.</span>
+            </label>
+
+            <label class="field">
+              <span>Local video paths</span>
+              <textarea id="localVideoPaths" name="local_video_paths" rows="4" spellcheck="false" placeholder="/Users/kapil/Videos/cam_01.mp4&#10;/Users/kapil/Videos/cam_02.mp4"></textarea>
             </label>
 
             <div class="choice-group" aria-label="Shot purpose">
@@ -79,6 +84,7 @@
                   <select id="syncMethod" name="synchronization_method">
                     <option value="audio">Audio cross correlation</option>
                     <option value="brightness">Brightness contrast detection</option>
+                    <option value="manual">Manual frame alignment</option>
                   </select>
                 </label>
                 <label class="field">
@@ -97,7 +103,7 @@
                 <div class="progress-track">
                   <div class="progress-fill" id="progressFill"></div>
                 </div>
-                <div class="progress-message" id="progressMessage">Select one or more MP4 files to create a shot.</div>
+                <div class="progress-message" id="progressMessage">Select MP4 files or paste local paths to create a shot.</div>
               </div>
               <div class="job-log" aria-label="Job log">
                 <strong>Job log</strong>
@@ -119,7 +125,10 @@
                 <h2 id="selectedShotName">Select a shot</h2>
                 <p class="shot-activity" id="shotActivity">No activity yet</p>
               </div>
-              <button class="secondary" id="detailRefreshButton" type="button">Refresh</button>
+              <div class="shot-header-actions">
+                <button class="danger" id="deleteShotButton" type="button">Delete shot</button>
+                <button class="secondary" id="detailRefreshButton" type="button">Refresh</button>
+              </div>
             </div>
 
             <dl class="shot-summary">
@@ -160,20 +169,30 @@
                 <span id="calibrationState">Waiting for sync</span>
               </div>
               <form id="calibrationForm" class="calibration-form">
-                <div class="controls-row">
-                  <label class="field">
-                    <span>Board</span>
-                    <select id="charucoBoardName" name="charuco_board_name">
+	                <div class="controls-row">
+	                  <label class="field">
+	                    <span>Board</span>
+	                    <select id="charucoBoardName" name="charuco_board_name">
                       <option value="7x5 Charuco">7x5 ChArUco</option>
                       <option value="5x3 Charuco">5x3 ChArUco</option>
                     </select>
                   </label>
                   <label class="field">
-                    <span>Square size (mm)</span>
-                    <input id="charucoSquareSize" name="charuco_square_size_mm" type="number" min="1" step="0.1" value="39" />
-                  </label>
-                </div>
-                <fieldset class="ground-plane-field">
+	                    <span>Square size (mm)</span>
+	                    <input id="charucoSquareSize" name="charuco_square_size_mm" type="number" min="1" step="0.1" value="39" />
+	                  </label>
+	                </div>
+	                <div class="controls-row">
+	                  <label class="field">
+	                    <span>Start time (s)</span>
+	                    <input id="calibrationStartTime" name="calibration_start_time" type="number" min="0" step="0.1" value="0" />
+	                  </label>
+	                  <label class="field">
+	                    <span>End time (s)</span>
+	                    <input id="calibrationEndTime" name="calibration_end_time" type="number" min="0" step="0.1" value="0" />
+	                  </label>
+	                </div>
+	                <fieldset class="ground-plane-field">
                   <legend>Ground plane</legend>
                   <div class="ground-plane-options">
                     <label>
@@ -260,6 +279,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260512-inline-pose-clips" type="module"></script>
+    <script src="/static/app.js?v=20260514-calibration-range" type="module"></script>
   </body>
 </html>

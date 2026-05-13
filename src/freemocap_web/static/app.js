@@ -19,6 +19,9 @@ const createShotNav = document.querySelector("#createShotNav");
 const recordingName = document.querySelector("#recordingName");
 const dropzone = document.querySelector("#dropzone");
 const syncButton = document.querySelector("#syncButton");
+const syncMethod = document.querySelector("#syncMethod");
+const localVideoPaths = document.querySelector("#localVideoPaths");
+const deleteShotButton = document.querySelector("#deleteShotButton");
 const createShotPanel = document.querySelector("#syncForm");
 const shotDetailPanel = document.querySelector("#shotDetailPanel");
 const selectedShotName = document.querySelector("#selectedShotName");
@@ -43,6 +46,8 @@ const calibrationState = document.querySelector("#calibrationState");
 const calibrationStage = document.querySelector("#calibrationStage");
 const charucoBoardName = document.querySelector("#charucoBoardName");
 const charucoSquareSize = document.querySelector("#charucoSquareSize");
+const calibrationStartTime = document.querySelector("#calibrationStartTime");
+const calibrationEndTime = document.querySelector("#calibrationEndTime");
 const useCharucoGroundplane = document.querySelector("#useCharucoGroundplane");
 const groundPlaneFrame = document.querySelector("#groundPlaneFrame");
 const groundPlanePicker = document.querySelector("#groundPlanePicker");
@@ -72,6 +77,8 @@ let activeView = null;
 let lastGroundPlaneVideo = null;
 let activeDetailTab = "sync";
 let detailTabTouched = false;
+let selectedSourceVideos = [];
+const FRAME_PREVIEW_REQUEST_BASE = Date.now() * 1000;
 const SHOT_UI_STORAGE_PREFIX = "freemocap-web-shot-ui:";
 
 function shotUiStateKey(shotId) {
@@ -98,6 +105,8 @@ function applyShotUiState(shot) {
   if (state.calibration) {
     if (state.calibration.charucoBoardName) charucoBoardName.value = state.calibration.charucoBoardName;
     if (state.calibration.charucoSquareSize) charucoSquareSize.value = state.calibration.charucoSquareSize;
+    calibrationStartTime.value = state.calibration.startTime ?? calibrationStartTime.value;
+    calibrationEndTime.value = state.calibration.endTime ?? calibrationEndTime.value;
     groundPlaneFrame.value = state.calibration.groundPlaneFrame ?? groundPlaneFrame.value;
     useCharucoGroundplane.checked = state.calibration.groundPlaneMode === "charuco";
     const cameraGroundPlane = calibrationForm.querySelector('input[name="ground_plane_mode"][value="camera"]');
@@ -113,6 +122,8 @@ function persistCalibrationUiState() {
     calibration: {
       charucoBoardName: charucoBoardName.value,
       charucoSquareSize: charucoSquareSize.value,
+      startTime: calibrationStartTime.value,
+      endTime: calibrationEndTime.value,
       groundPlaneMode: useCharucoGroundplane.checked ? "charuco" : "camera",
       groundPlaneFrame: groundPlaneFrame.value,
     },
@@ -124,8 +135,37 @@ function defaultRecordingName() {
   return `shot_${stamp}`;
 }
 
+function fileSelectionKey(file) {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
+function addSelectedVideos(files) {
+  const existingFiles = new Set(selectedSourceVideos.map(fileSelectionKey));
+  const newVideos = Array.from(files || []).filter((file) => file.name.toLowerCase().endsWith(".mp4"));
+  newVideos.forEach((file) => {
+    const key = fileSelectionKey(file);
+    if (!existingFiles.has(key)) {
+      selectedSourceVideos.push(file);
+      existingFiles.add(key);
+    }
+  });
+}
+
+function clearSelectedVideos() {
+  selectedSourceVideos = [];
+  fileInput.value = "";
+  localVideoPaths.value = "";
+}
+
 function selectedVideos() {
-  return Array.from(fileInput.files || []).filter((file) => file.name.toLowerCase().endsWith(".mp4"));
+  return selectedSourceVideos;
+}
+
+function selectedLocalVideoPaths() {
+  return (localVideoPaths.value || "")
+    .split(/\r?\n/)
+    .map((path) => path.trim())
+    .filter(Boolean);
 }
 
 function formatSize(bytes) {
@@ -278,36 +318,46 @@ function updateDetailTabs(shot) {
 
 function renderVideos() {
   const videos = selectedVideos();
+  const localPaths = selectedLocalVideoPaths();
+  const selectedSourceCount = videos.length + localPaths.length;
   const bytes = videos.reduce((total, file) => total + file.size, 0);
-  appShell.classList.toggle("has-selection", videos.length > 0);
+  const usesManualSync = syncMethod.value === "manual";
+  appShell.classList.toggle("has-selection", selectedSourceCount > 0);
 
-  if (videos.length >= 2) {
+  if (selectedSourceCount >= 2) {
     syncButton.disabled = false;
     syncStatus.textContent = "";
-    selectedVideoSummary.textContent = `${videos.length} videos selected`;
-    setCreateProgress(0, "Ready", `Run Skelly sync when these ${videos.length} videos look right.`);
-    setCreateLog(`${videos.length} source videos selected`, `${formatSize(bytes)} ready for upload`);
-  } else if (videos.length === 1) {
+    selectedVideoSummary.textContent = `${selectedSourceCount} videos selected`;
+    setCreateProgress(
+      0,
+      "Ready",
+      usesManualSync
+        ? `Create manual alignment previews for these ${selectedSourceCount} videos.`
+        : `Run Skelly sync when these ${selectedSourceCount} videos look right.`,
+    );
+    const localPathSummary = localPaths.length ? `${localPaths.length} local path${localPaths.length === 1 ? "" : "s"}` : formatSize(bytes);
+    setCreateLog(`${selectedSourceCount} source videos selected`, `${localPathSummary} ready for ${usesManualSync ? "manual alignment" : "processing"}`);
+  } else if (selectedSourceCount === 1) {
     syncButton.disabled = false;
     syncStatus.textContent = "";
     selectedVideoSummary.textContent = "1 video selected";
     setCreateProgress(0, "Ready", "Prepare this single-video shot for downstream processing.");
-    setCreateLog("1 source video selected", `${formatSize(bytes)} ready for upload`);
+    setCreateLog("1 source video selected", localPaths.length ? "1 local path ready for processing" : `${formatSize(bytes)} ready for upload`);
   } else {
     syncButton.disabled = true;
     selectedVideoSummary.textContent = "Select videos";
-    setCreateProgress(0, "Waiting for videos", "Select one or more MP4 files to create a shot.");
-    setCreateLog("Waiting for source videos", "Select camera files from the same shot");
+    setCreateProgress(0, "Waiting for videos", "Select MP4 files or paste local paths to create a shot.");
+    setCreateLog("Waiting for source videos", "Use files or local paths from the same shot");
   }
 }
 
 function setBusy(isBusy) {
-  form.querySelectorAll("button, input, select").forEach((element) => {
+  form.querySelectorAll("button, input, select, textarea").forEach((element) => {
     element.disabled = isBusy;
   });
   fileInput.disabled = isBusy;
   if (!isBusy) {
-    syncButton.disabled = selectedVideos().length < 1;
+    syncButton.disabled = selectedVideos().length + selectedLocalVideoPaths().length < 1;
   }
 }
 
@@ -476,6 +526,29 @@ function syncedVideoCount(shot) {
   return Number(shot.video_count) || 0;
 }
 
+function videoFilenameFromElement(video) {
+  const source = video.currentSrc || video.src || "";
+  if (!source) return video.dataset.videoName || "";
+  try {
+    return decodeURIComponent(new URL(source, window.location.href).pathname.split("/").pop() || "");
+  } catch {
+    return video.dataset.videoName || "";
+  }
+}
+
+function synchronizedVideoFrameCount(shot, videoName) {
+  const counts = shot.synchronized_video_frame_counts || shot.status?.video_and_camera_info?.number_of_frames_in_videos || {};
+  const value = counts[videoName];
+  const count = Number(value);
+  return Number.isFinite(count) && count > 0 ? count : 0;
+}
+
+function synchronizedVideoFps(shot, videoName) {
+  const value = (shot.synchronized_video_fps || {})[videoName];
+  const fps = Number(value);
+  return Number.isFinite(fps) && fps > 0 ? fps : 0;
+}
+
 function canRunCalibration(shot) {
   const running = ["queued", "running"].includes(shot.latest_job?.state);
   return syncedVideoCount(shot) >= 2 && !running;
@@ -489,10 +562,10 @@ function canRunMotionCapture(shot) {
 }
 
 function estimateShotFrameRate(shot, video) {
-  const frameCounts = Object.values(shot.status?.video_and_camera_info?.number_of_frames_in_videos || {})
-    .map((value) => Number(value))
-    .filter((value) => Number.isFinite(value) && value > 0);
-  const frameCount = frameCounts.length ? Math.min(...frameCounts) : 0;
+  const videoName = videoFilenameFromElement(video);
+  const mappedFps = synchronizedVideoFps(shot, videoName);
+  if (mappedFps) return mappedFps;
+  const frameCount = synchronizedVideoFrameCount(shot, videoName);
   if (frameCount && Number.isFinite(video.duration) && video.duration > 0) {
     return frameCount / video.duration;
   }
@@ -568,8 +641,11 @@ function setupGroundPlanePicker(shot) {
   if (!videoSelect || !video || !frameInput || !scrubber) return;
 
   const updateFrameLimit = () => {
+    const frameCount = synchronizedVideoFrameCount(shot, videoSelect.value);
     const fps = estimateShotFrameRate(shot, video);
-    const maxFrame = Number.isFinite(video.duration) && video.duration > 0
+    const maxFrame = frameCount
+      ? Math.max(0, frameCount - 1)
+      : Number.isFinite(video.duration) && video.duration > 0
       ? Math.max(0, Math.floor(video.duration * fps) - 1)
       : 0;
     scrubber.max = String(maxFrame);
@@ -711,6 +787,16 @@ function pose3dUrl(shot) {
   return `/api/shots/${encodeURIComponent(shot.id)}/pose-3d?v=${encodeURIComponent(dataKey)}`;
 }
 
+function framePreviewUrl(shot, filename, frame, offset = 0, requestId = 0) {
+  const params = new URLSearchParams({
+    frame: String(Math.max(0, Math.round(Number(frame) || 0))),
+    offset: String(Math.round(Number(offset) || 0)),
+    v: String(mediaCacheKey(shot)),
+    request_id: String(FRAME_PREVIEW_REQUEST_BASE + Math.max(0, Math.round(Number(requestId) || 0))),
+  });
+  return `/api/shots/${encodeURIComponent(shot.id)}/frame-previews/${encodeURIComponent(filename)}?${params.toString()}`;
+}
+
 function formatTime(seconds) {
   const safeSeconds = Math.max(0, Number(seconds) || 0);
   const minutes = Math.floor(safeSeconds / 60);
@@ -722,6 +808,10 @@ function formatTime(seconds) {
 
 function renderSideBySidePlayer(shot) {
   const manualResync = renderManualResyncPanel(shot);
+  if (isManualAlignmentShot(shot)) {
+    return manualResync || `<div class="video-row muted">No synchronized videos found</div>`;
+  }
+
   if (shot.side_by_side_video) {
     return `
       <article class="combined-player">
@@ -775,15 +865,40 @@ function renderManualResyncPanel(shot) {
   if (playableVideos.length < 2) {
     return "";
   }
-  const uiState = loadShotUiState(shot.id);
+  const completedResync = completedManualResyncJob(shot);
+  let uiState = loadShotUiState(shot.id);
+  if (completedResync && uiState.reviewedResyncJobId !== completedResync.id) {
+    uiState = {
+      ...uiState,
+      resyncBaseFrame: "0",
+      resyncOffsets: {},
+      reviewedResyncJobId: completedResync.id,
+    };
+    saveShotUiState(shot.id, {
+      resyncBaseFrame: "0",
+      resyncOffsets: {},
+      reviewedResyncJobId: completedResync.id,
+    });
+  }
   const resyncOffsets = uiState.resyncOffsets || {};
   const resyncBaseFrame = uiState.resyncBaseFrame || "0";
+  const useFrameImages = isManualAlignmentShot(shot);
+  const reviewMarkup = completedResync
+    ? `
+      <div class="resync-review-callout">
+        <strong>Resync applied</strong>
+        <span>Offsets are reset for review. Step through frames below and confirm the cameras are aligned before calibration.</span>
+        <button class="secondary" type="button" data-open-calibration>Go to Calibration</button>
+      </div>
+    `
+    : "";
 
   const videoMarkup = playableVideos
     .map(
       (video, index) => `
         <article class="resync-camera" data-resync-camera>
-          <video muted playsinline preload="metadata" poster="${posterUrl(shot, video)}" src="${videoUrl(shot, video)}" data-resync-video data-video-name="${video}"></video>
+          <video muted playsinline preload="metadata" poster="${posterUrl(shot, video)}" src="${videoUrl(shot, video)}" data-resync-video data-video-name="${video}" ${useFrameImages ? "hidden" : ""}></video>
+          <img class="resync-frame-preview" alt="Frame preview for Camera ${index + 1}" data-resync-frame-preview data-video-name="${video}" ${useFrameImages ? "" : "hidden"} />
           <div class="resync-camera-controls">
             <strong>Camera ${index + 1}</strong>
             <span>${video}</span>
@@ -804,8 +919,9 @@ function renderManualResyncPanel(shot) {
     <section class="manual-resync" data-manual-resync>
       <div class="section-title-row">
         <h3>Frame resync</h3>
-        <span>Manual offsets</span>
+        <span>${completedResync ? "Review synced frames" : "Manual offsets"}</span>
       </div>
+      ${reviewMarkup}
       <div class="manual-resync-controls">
         <button class="secondary" type="button" data-resync-frame-step="-1">Previous frame</button>
         <label>
@@ -830,6 +946,31 @@ function renderCalibrationPreviewPlayer(shot) {
   if (!shot.calibration_preview_ready || !shot.calibration_side_by_side_video) {
     return "";
   }
+
+  const cameraVideos = (shot.calibration_preview_videos || []).filter((video) => video !== shot.calibration_side_by_side_video);
+  const cameraMarkup = cameraVideos.length
+    ? `
+      <section class="inline-preview-section" aria-label="Calibration camera overlays">
+        <div class="inline-preview-heading">
+          <strong>Camera overlays</strong>
+          <span>${cameraVideos.length} camera${cameraVideos.length === 1 ? "" : "s"}</span>
+        </div>
+        <div class="pose-clip-grid">
+          ${cameraVideos
+            .map((video, index) => `
+              <article class="clip-card">
+                <video controls playsinline preload="metadata" poster="${calibrationPreviewPosterUrl(shot, video)}" src="${calibrationPreviewVideoUrl(shot, video)}"></video>
+                <div>
+                  <strong>Camera ${index + 1}</strong>
+                  <span>${video}</span>
+                </div>
+              </article>
+            `)
+            .join("")}
+        </div>
+      </section>
+    `
+    : "";
 
   const debugFrames = shot.calibration_debug_frames || [];
   const debugFrameMarkup = debugFrames.length
@@ -866,6 +1007,7 @@ function renderCalibrationPreviewPlayer(shot) {
         <span>Detected board features and calibration axes burned into a derived preview.</span>
       </div>
     </article>
+    ${cameraMarkup}
     ${debugFrameMarkup}
   `;
 }
@@ -929,6 +1071,16 @@ function renderInlinePoseClips(shot) {
       ${clips}
     </section>
   `;
+}
+
+function isManualAlignmentShot(shot) {
+  const job = shot.latest_job;
+  return shot.sync_method === "manual" || (job?.type === "sync" && job.method === "manual");
+}
+
+function completedManualResyncJob(shot) {
+  const job = shot.latest_job;
+  return job?.type === "manual_resync" && job.state === "complete" ? job : null;
 }
 
 function formatCalibrationValue(value, suffix = "") {
@@ -1303,11 +1455,15 @@ function setupManualResync(shot) {
   if (!panel) return;
 
   const videos = Array.from(panel.querySelectorAll("[data-resync-video]"));
+  const frameImages = Array.from(panel.querySelectorAll("[data-resync-frame-preview]"));
   const baseFrameInput = panel.querySelector("[data-resync-base-frame]");
   const frameScrubber = panel.querySelector("[data-resync-frame-scrubber]");
   const status = panel.querySelector("[data-resync-status]");
   const applyButton = panel.querySelector("[data-apply-resync]");
   const fps = 30;
+  let previewTimer = null;
+  let previewRequestId = 0;
+  const framePreviewControllers = new Map();
 
   const setStatus = (message, isError = false) => {
     status.textContent = message;
@@ -1327,10 +1483,25 @@ function setupManualResync(shot) {
   };
 
   const updateFrameLimit = () => {
-    const frameCounts = videos
-      .filter((video) => Number.isFinite(video.duration) && video.duration > 0)
-      .map((video) => Math.max(0, Math.floor(video.duration * fps) - 1));
-    const maxFrame = frameCounts.length ? Math.min(...frameCounts) : 0;
+    let frameCounts = videos
+      .map((video) => synchronizedVideoFrameCount(shot, video.dataset.videoName))
+      .filter((value) => Number.isFinite(value) && value > 0)
+      .map((value) => value - 1);
+    if (!frameCounts.length) {
+      frameCounts = videos
+        .filter((video) => Number.isFinite(video.duration) && video.duration > 0)
+        .map((video) => {
+          const videoFps = synchronizedVideoFps(shot, video.dataset.videoName) || fps;
+          return Math.max(0, Math.floor(video.duration * videoFps) - 1);
+        });
+    }
+    if (!frameCounts.length && isManualAlignmentShot(shot)) {
+      frameCounts = Object.values(shot.status?.video_and_camera_info?.number_of_frames_in_videos || {})
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0)
+        .map((value) => value - 1);
+    }
+    const maxFrame = frameCounts.length ? Math.max(...frameCounts) : isManualAlignmentShot(shot) ? 100000 : 0;
     frameScrubber.max = String(maxFrame);
     baseFrameInput.max = String(maxFrame);
     if ((Number(baseFrameInput.value) || 0) > maxFrame) {
@@ -1341,15 +1512,54 @@ function setupManualResync(shot) {
   };
 
   const setBaseFrame = (frame) => {
-    const maxFrame = Number(frameScrubber.max) || updateFrameLimit();
+    const currentMaxFrame = Number(frameScrubber.max);
+    const maxFrame = Number.isFinite(currentMaxFrame) && currentMaxFrame > 0 ? currentMaxFrame : updateFrameLimit();
     const safeFrame = Math.max(0, Math.min(maxFrame, Math.round(Number(frame) || 0)));
     baseFrameInput.value = String(safeFrame);
     frameScrubber.value = String(safeFrame);
     persistResyncUiState();
   };
 
+  const loadFramePreview = async (image, videoName, baseFrame, offset, requestId) => {
+    const existing = framePreviewControllers.get(videoName);
+    if (existing) existing.abort();
+
+    const controller = new AbortController();
+    framePreviewControllers.set(videoName, controller);
+    const url = framePreviewUrl(shot, videoName, baseFrame, offset, requestId);
+
+    try {
+      const response = await fetch(url, { signal: controller.signal, cache: "no-store" });
+      if (requestId !== previewRequestId || controller.signal.aborted || response.status === 204) return;
+      if (!response.ok) throw new Error(`Frame preview failed: ${response.status}`);
+
+      const blob = await response.blob();
+      if (requestId !== previewRequestId || controller.signal.aborted) return;
+
+      const objectUrl = URL.createObjectURL(blob);
+      if (image.dataset.objectUrl) {
+        URL.revokeObjectURL(image.dataset.objectUrl);
+      }
+      image.dataset.objectUrl = objectUrl;
+      image.src = objectUrl;
+      image.hidden = false;
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        throw error;
+      }
+    } finally {
+      if (framePreviewControllers.get(videoName) === controller) {
+        framePreviewControllers.delete(videoName);
+      }
+    }
+  };
+
   const previewOffsets = async () => {
+    const requestId = ++previewRequestId;
+    framePreviewControllers.forEach((controller) => controller.abort());
+    framePreviewControllers.clear();
     await Promise.allSettled(videos.map(waitForVideoMetadata));
+    if (requestId !== previewRequestId) return;
     updateFrameLimit();
     setBaseFrame(baseFrameInput.value);
     const baseFrame = Number(baseFrameInput.value) || 0;
@@ -1357,9 +1567,29 @@ function setupManualResync(shot) {
       const input = offsetInputs().find((candidate) => candidate.dataset.videoName === video.dataset.videoName);
       const offset = Number(input?.value) || 0;
       const targetFrame = Math.max(0, baseFrame + offset);
-      const durationFrame = Number.isFinite(video.duration) ? Math.max(0, Math.floor(video.duration * fps) - 1) : targetFrame;
-      video.currentTime = Math.min(targetFrame, durationFrame) / fps;
+      const videoFrameCount = synchronizedVideoFrameCount(shot, video.dataset.videoName);
+      const videoFps = synchronizedVideoFps(shot, video.dataset.videoName) || fps;
+      const durationFrame = videoFrameCount
+        ? Math.max(0, videoFrameCount - 1)
+        : Number.isFinite(video.duration) ? Math.max(0, Math.floor(video.duration * videoFps) - 1) : targetFrame;
+      const clampedTargetFrame = Math.min(targetFrame, durationFrame);
+      video.currentTime = clampedTargetFrame / videoFps;
+      const frameImage = frameImages.find((candidate) => candidate.dataset.videoName === video.dataset.videoName);
+      if (frameImage && (isManualAlignmentShot(shot) || video.error || !Number.isFinite(video.duration))) {
+        frameImage.hidden = false;
+        video.hidden = true;
+        loadFramePreview(frameImage, video.dataset.videoName, clampedTargetFrame, 0, requestId).catch((error) => {
+          if (requestId === previewRequestId) setStatus(error.message, true);
+        });
+      }
     });
+  };
+
+  const schedulePreviewOffsets = (delay = 120) => {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => {
+      previewOffsets().catch((error) => setStatus(error.message, true));
+    }, delay);
   };
 
   panel.addEventListener("click", (event) => {
@@ -1370,7 +1600,7 @@ function setupManualResync(shot) {
       if (input) {
         input.value = String((Number(input.value) || 0) + Number(offsetButton.dataset.offsetStep));
         persistResyncUiState();
-        previewOffsets().catch((error) => setStatus(error.message, true));
+        schedulePreviewOffsets(80);
       }
       return;
     }
@@ -1378,23 +1608,34 @@ function setupManualResync(shot) {
     const frameButton = event.target.closest("[data-resync-frame-step]");
     if (frameButton) {
       setBaseFrame((Number(baseFrameInput.value) || 0) + Number(frameButton.dataset.resyncFrameStep));
-      previewOffsets().catch((error) => setStatus(error.message, true));
+      schedulePreviewOffsets(80);
       return;
+    }
+
+    const calibrationButton = event.target.closest("[data-open-calibration]");
+    if (calibrationButton) {
+      detailTabTouched = true;
+      showDetailTab("calibration");
     }
   });
 
   baseFrameInput.addEventListener("input", () => {
     setBaseFrame(baseFrameInput.value);
-    previewOffsets().catch((error) => setStatus(error.message, true));
+    schedulePreviewOffsets();
   });
   frameScrubber.addEventListener("input", () => {
     setBaseFrame(frameScrubber.value);
-    previewOffsets().catch((error) => setStatus(error.message, true));
+    schedulePreviewOffsets();
   });
   offsetInputs().forEach((input) => {
     input.addEventListener("change", () => {
       persistResyncUiState();
-      previewOffsets().catch((error) => setStatus(error.message, true));
+      schedulePreviewOffsets(80);
+    });
+  });
+  frameImages.forEach((image) => {
+    image.addEventListener("error", () => {
+      setStatus("Frame preview failed. Make sure FFmpeg is available to the running server.", true);
     });
   });
 
@@ -1434,10 +1675,11 @@ function setupManualResync(shot) {
     }
   });
 
-  previewOffsets().catch(() => {});
+  schedulePreviewOffsets(0);
 }
 
 async function ensureBrowserPreviews(shot) {
+  if (isManualAlignmentShot(shot)) return;
   if ((shot.browser_preview_ready && shot.side_by_side_video) || !shot.videos.length) return;
   selectedShotVideos.innerHTML = `<div class="video-row muted">Preparing browser playback preview...</div>`;
   try {
@@ -1510,6 +1752,7 @@ function renderSelectedShot() {
 
   const state = shotState(shot);
   const job = shot.latest_job;
+  deleteShotButton.disabled = false;
   selectedShotName.textContent = shot.name;
   selectedShotPurpose.textContent = purposeLabel(shot.purpose);
   selectedShotState.textContent = state.text;
@@ -1531,6 +1774,30 @@ function renderSelectedShot() {
   showDetailTab(activeDetailTab);
 
   activeJobId = ["queued", "running"].includes(job?.state) ? job.id : null;
+}
+
+async function deleteSelectedShot() {
+  const shot = recordingsCache.find((recording) => recording.id === selectedShotId);
+  if (!shot) return;
+  const confirmed = window.confirm(`Force delete "${shot.name}"?\n\nThis removes the shot from the project and deletes its recording folder from disk.`);
+  if (!confirmed) return;
+
+  deleteShotButton.disabled = true;
+  try {
+    await api(`/api/shots/${encodeURIComponent(shot.id)}?force=true`, { method: "DELETE" });
+    if (activeJobId === shot.latest_job?.id) {
+      activeJobId = null;
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    selectedShotId = null;
+    detailTabTouched = false;
+    localStorage.removeItem(shotUiStateKey(shot.id));
+    await refresh();
+  } catch (error) {
+    deleteShotButton.disabled = false;
+    shotActivity.innerHTML = `<span class="error">${error.message}</span>`;
+  }
 }
 
 function renderRecordings(recordings) {
@@ -1600,7 +1867,7 @@ async function pollJob(jobId) {
     if (job.type === "sync") {
       syncStatus.textContent = "Synchronized.";
       recordingName.value = defaultRecordingName();
-      fileInput.value = "";
+      clearSelectedVideos();
       renderVideos();
       setBusy(false);
     } else if (job.type === "calibration") {
@@ -1661,9 +1928,16 @@ sidebarShotsList.addEventListener("click", (event) => {
 });
 
 recordingName.value = defaultRecordingName();
-fileInput.addEventListener("change", renderVideos);
+fileInput.addEventListener("change", () => {
+  addSelectedVideos(fileInput.files);
+  fileInput.value = "";
+  renderVideos();
+});
+syncMethod.addEventListener("change", renderVideos);
+localVideoPaths.addEventListener("input", renderVideos);
 refreshButton.addEventListener("click", refresh);
 detailRefreshButton.addEventListener("click", refresh);
+deleteShotButton.addEventListener("click", deleteSelectedShot);
 detailTabButtons.forEach((button) => {
   button.addEventListener("click", () => {
     detailTabTouched = true;
@@ -1688,24 +1962,27 @@ calibrationForm.querySelectorAll("input, select").forEach((field) => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const videos = selectedVideos();
-  if (videos.length < 1) {
-    syncStatus.innerHTML = `<span class="error">Select one or more MP4 files.</span>`;
+  const localPaths = selectedLocalVideoPaths();
+  const selectedSourceCount = videos.length + localPaths.length;
+  if (selectedSourceCount < 1) {
+    syncStatus.innerHTML = `<span class="error">Select one or more MP4 files or paste local video paths.</span>`;
     return;
   }
 
   const data = new FormData();
   data.append("recording_name", recordingName.value);
   data.append("purpose", document.querySelector('input[name="purpose"]:checked').value);
-  data.append("synchronization_method", document.querySelector("#syncMethod").value);
+  data.append("synchronization_method", syncMethod.value);
   data.append("brightness_threshold", document.querySelector("#brightnessThreshold").value);
+  data.append("local_video_paths", localPaths.join("\n"));
   videos.forEach((file) => data.append("files", file, file.name));
 
   clearInterval(pollTimer);
   pollTimer = null;
   jobConsole.classList.remove("is-hidden");
   syncStatus.textContent = "";
-  setCreateProgress(10, "Uploading", `Uploading ${videos.length} selected videos.`);
-  setCreateLog(`${videos.length} source videos selected`, "Uploading to FreeMoCap Web");
+  setCreateProgress(10, "Loading", `Loading ${selectedSourceCount} selected videos.`);
+  setCreateLog(`${selectedSourceCount} source videos selected`, localPaths.length ? "Copying local files into FreeMoCap Web" : "Uploading to FreeMoCap Web");
   setBusy(true);
 
   try {
@@ -1750,6 +2027,8 @@ calibrationForm.addEventListener("submit", async (event) => {
   data.append("charuco_square_size_mm", charucoSquareSize.value);
   data.append("use_charuco_as_groundplane", useCharucoGroundplane.checked ? "true" : "false");
   data.append("ground_plane_frame", groundPlaneFrame.value || "0");
+  data.append("calibration_start_time", calibrationStartTime.value || "0");
+  data.append("calibration_end_time", calibrationEndTime.value || "0");
 
   clearInterval(pollTimer);
   pollTimer = null;
